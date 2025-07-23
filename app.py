@@ -1,4 +1,5 @@
 import os
+import logging
 from flask import Flask, request, jsonify
 from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings, TurnContext
 from botbuilder.schema import Activity
@@ -6,11 +7,21 @@ import openai
 from dotenv import load_dotenv
 import asyncio
 
+# Logging тохиргоо
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 load_dotenv()
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-SETTINGS = BotFrameworkAdapterSettings(os.getenv("MICROSOFT_APP_ID"), os.getenv("MICROSOFT_APP_PASSWORD"))
+# Bot Framework тохиргоо
+app_id = os.getenv("MICROSOFT_APP_ID", "")
+app_password = os.getenv("MICROSOFT_APP_PASSWORD", "")
+
+logger.info(f"Bot starting with App ID: {app_id[:10]}..." if app_id else "No App ID")
+
+SETTINGS = BotFrameworkAdapterSettings(app_id, app_password)
 ADAPTER = BotFrameworkAdapter(SETTINGS)
 
 app = Flask(__name__)
@@ -21,43 +32,97 @@ def health_check():
     return jsonify({
         "status": "running",
         "message": "Flask Bot Server is running",
-        "endpoints": ["/api/messages"]
+        "endpoints": ["/api/messages"],
+        "app_id_configured": bool(os.getenv("MICROSOFT_APP_ID")),
+        "openai_configured": bool(os.getenv("OPENAI_API_KEY"))
     })
 
 @app.route("/api/messages", methods=["POST"])
 def process_messages():
     try:
+        logger.info("Received message request")
+        
+        # Request body шалгах
+        if not request.is_json:
+            logger.error("Request is not JSON")
+            return jsonify({"error": "Content-Type must be application/json"}), 400
+            
         body = request.get_json()
+        logger.info(f"Request body: {body}")
         
         # Хэрэв body хоосон бол
         if not body:
+            logger.error("Empty request body")
             return jsonify({"error": "Request body is required"}), 400
-            
-        activity = Activity().deserialize(body)
+
+        # Activity объект үүсгэх
+        try:
+            activity = Activity().deserialize(body)
+            logger.info(f"Activity type: {activity.type}, text: {activity.text}")
+        except Exception as e:
+            logger.error(f"Failed to deserialize activity: {str(e)}")
+            return jsonify({"error": f"Invalid activity format: {str(e)}"}), 400
 
         async def logic(context: TurnContext):
-            if activity.type == "message":
-                user_text = activity.text or "No text provided"
-                
-                # OpenAI API key байгаа эсэхийг шалгах
-                if not openai.api_key:
-                    await context.send_activity("OpenAI API key тохируулаагүй байна.")
-                    return
-                
-                try:
-                    response = openai.ChatCompletion.create(
-                        model="gpt-3.5-turbo",
-                        messages=[{"role": "user", "content": user_text}]
-                    )
-                    await context.send_activity(response.choices[0].message["content"])
-                except Exception as e:
-                    await context.send_activity(f"OpenAI API алдаа: {str(e)}")
+            try:
+                if activity.type == "message":
+                    user_text = activity.text or "No text provided"
+                    logger.info(f"Processing message: {user_text}")
+                    
+                    # OpenAI API key шалгах
+                    if not openai.api_key:
+                        logger.warning("OpenAI API key not configured")
+                        await context.send_activity("OpenAI API key тохируулаагүй байна.")
+                        return
+                    
+                    try:
+                        # OpenAI API дуудах (шинэ format)
+                        client = openai.OpenAI(api_key=openai.api_key)
+                        response = client.chat.completions.create(
+                            model="gpt-3.5-turbo",
+                            messages=[{"role": "user", "content": user_text}]
+                        )
+                        
+                        ai_response = response.choices[0].message.content
+                        logger.info(f"OpenAI response: {ai_response[:100]}...")
+                        await context.send_activity(ai_response)
+                        
+                    except Exception as e:
+                        logger.error(f"OpenAI API error: {str(e)}")
+                        await context.send_activity(f"OpenAI API алдаа: {str(e)}")
+                        
+                else:
+                    logger.info(f"Non-message activity type: {activity.type}")
+                    
+            except Exception as e:
+                logger.error(f"Error in logic function: {str(e)}")
+                await context.send_activity(f"Серверийн алдаа: {str(e)}")
 
-        # Run async logic in a new event loop
-        asyncio.run(ADAPTER.process_activity(activity, "", logic))
-        return jsonify({"status": "success"}), 200
+        # Bot adapter ашиглан мессеж боловсруулах
+        try:
+            auth_header = request.headers.get('Authorization', '')
+            logger.info(f"Auth header present: {bool(auth_header)}")
+            
+            # Async function-ийг sync контекстэд ажиллуулах
+            asyncio.run(ADAPTER.process_activity(activity, auth_header, logic))
+            logger.info("Message processed successfully")
+            return jsonify({"status": "success"}), 200
+            
+        except Exception as e:
+            logger.error(f"Adapter processing error: {str(e)}")
+            return jsonify({"error": f"Bot framework error: {str(e)}"}), 500
+            
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"Unexpected error: {str(e)}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+# Error handler
+@app.errorhandler(500)
+def internal_error(error):
+    logger.error(f"500 error: {str(error)}")
+    return jsonify({"error": "Internal server error"}), 500
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), debug=True)
+    port = int(os.environ.get("PORT", 8000))
+    logger.info(f"Starting Flask app on port {port}")
+    app.run(host="0.0.0.0", port=port, debug=True)
