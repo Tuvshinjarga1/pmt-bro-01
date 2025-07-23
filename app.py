@@ -9,7 +9,6 @@ load_dotenv()
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# Bot Framework
 SETTINGS = BotFrameworkAdapterSettings(os.getenv("MICROSOFT_APP_ID"), os.getenv("MICROSOFT_APP_PASSWORD"))
 ADAPTER = BotFrameworkAdapter(SETTINGS)
 
@@ -33,4 +32,4 @@ app = web.Application()
 app.router.add_post("/api/messages", process_activity)
 
 if __name__ == "__main__":
-    web.run_app(app, port=3978)
+    web.run_app(app, port=int(os.environ.get("PORT", 3978)))

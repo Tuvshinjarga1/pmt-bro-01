@@ -1,5 +1,6 @@
-aiohttp 
-openai 
-python-dotenv 
-botbuilder-core 
+aiohttp
+botbuilder-core
 botbuilder-schema
+openai
+python-dotenv
+gunicorn
