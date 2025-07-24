@@ -136,25 +136,34 @@ def process_messages():
                             
                             if leave_analysis and leave_analysis.get("is_leave_request", False):
                                 confidence = leave_analysis.get("confidence", 0.0)
-                                logger.info(f"Leave request detected with confidence: {confidence}")
+                                missing_info = leave_analysis.get("missing_info", [])
+                                logger.info(f"Leave request detected with confidence: {confidence}, missing: {missing_info}")
                                 
-                                # Лидэрт Teams мессеж илгээх
-                                teams_service = TeamsAuthService()
-                                success = teams_service.send_leave_request_to_manager(leave_analysis)
-                                
-                                if success:
+                                # Хэрэв мэдээлэл дутуу бол лавлах
+                                if missing_info:
+                                    follow_up = leave_service.generate_follow_up_questions(missing_info)
                                     await context.send_activity(
-                                        f"🏖️ **Чөлөөний хүсэлт илгээгдлээ!**\n\n"
-                                        f"📋 **Мэдээлэл:**\n"
-                                        f"📅 Эхлэх өдөр: {leave_analysis.get('start_date', 'Тодорхойгүй')}\n"
-                                        f"📅 Дуусах өдөр: {leave_analysis.get('end_date', 'Тодорхойгүй')}\n"
-                                        f"⏰ Нийт цаг: {leave_analysis.get('in_active_hours', 8.0)} цаг\n"
-                                        f"📝 Шалтгаан: {leave_analysis.get('reason', 'Дурдаагүй')}\n\n"
-                                        f"✅ Таны хүсэлт лидэрт илгээгдлээ. Хариулт хүлээж байна уу.\n\n---\n"
+                                        f"🏖️ **Чөлөөний хүсэлт танигдлаа!**\n\n{follow_up}\n\n---\n"
                                     )
                                     leave_request_processed = True
                                 else:
-                                    await context.send_activity("⚠️ Чөлөөний хүсэлт илгээхэд алдаа гарлаа.\n\n---\n")
+                                    # Бүрэн мэдээлэл байвал лидэрт илгээх
+                                    teams_service = TeamsAuthService()
+                                    success = teams_service.send_leave_request_to_manager(leave_analysis)
+                                    
+                                    if success:
+                                        await context.send_activity(
+                                            f"🏖️ **Чөлөөний хүсэлт илгээгдлээ!**\n\n"
+                                            f"📋 **Мэдээлэл:**\n"
+                                            f"📅 Эхлэх өдөр: {leave_analysis.get('start_date', 'Тодорхойгүй')}\n"
+                                            f"📅 Дуусах өдөр: {leave_analysis.get('end_date', 'Тодорхойгүй')}\n"
+                                            f"⏰ Нийт цаг: {leave_analysis.get('in_active_hours', 8.0)} цаг\n"
+                                            f"📝 Шалтгаан: {leave_analysis.get('reason', 'Дурдаагүй')}\n\n"
+                                            f"✅ Таны хүсэлт лидэрт илгээгдлээ. Хариулт хүлээж байна уу.\n\n---\n"
+                                        )
+                                        leave_request_processed = True
+                                    else:
+                                        await context.send_activity("⚠️ Чөлөөний хүсэлт илгээхэд алдаа гарлаа.\n\n---\n")
                             else:
                                 logger.info("No leave request detected in message")
                                 
@@ -175,7 +184,9 @@ def process_messages():
                             
                             # Хэрэв чөлөөний хүсэлт танигдсан ч нэмэлт асуулт байвал тэмдэглэх
                             system_message = """Та хэрэглэгчийн асистент бот байна. Монгол хэлээр хариулна уу. 
-                            Хэрэв хэрэглэгч чөлөөний талаар асуувал дэмжлэг үзүүлж, туслах мэдээлэл өгнө үү. 'chuluu=чөлөө'"""
+                            Хэрэглэгч транслит (латин үсгээр монгол хэл) эсвэл монгол хэлээр бичиж болно.
+                            Транслит жишээ: 'chuluu'=чөлөө, 'margaash'=маргааш, 'tsag'=цаг
+                            Хэрэглэгчийн асуултад тохиромжтой, хүүхэд найрсаг хариулт өгнө үү."""
                             
                             response = client.chat.completions.create(
                                 model="gpt-4",
