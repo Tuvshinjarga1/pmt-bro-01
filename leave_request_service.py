@@ -12,14 +12,26 @@ class LeaveRequestService:
     """Чөлөөний хүсэлтийг танидаг сервис"""
     
     def __init__(self):
-        config = Config()
-        self.openai_key = config.OPENAI_API_KEY
+        try:
+            config = Config()
+            self.openai_key = config.OPENAI_API_KEY
+            
+            if not self.openai_key:
+                print("❌ OpenAI API key тохируулаагүй байна")
+                
+        except Exception as e:
+            print(f"❌ Leave request service эхлүүлэхэд алдаа: {str(e)}")
+            self.openai_key = None
         
     def analyze_message_for_leave_request(self, message: str, user_email: str) -> Optional[Dict]:
         """
         Мессежийг шинжилж чөлөөний хүсэлт эсэхийг тодорхойлох
         """
         try:
+            if not self.openai_key:
+                print("❌ OpenAI API key алга байна")
+                return None
+                
             client = openai.OpenAI(api_key=self.openai_key)
             
             # NLP prompt for leave request detection
@@ -57,7 +69,7 @@ class LeaveRequestService:
             response = client.chat.completions.create(
                 model="gpt-4",
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.3
+                temperature=0.8,
             )
             
             result_text = response.choices[0].message.content.strip()

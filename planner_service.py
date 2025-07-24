@@ -15,36 +15,46 @@ def get_access_token() -> str:
     """Get access token using client credentials"""
     global _cached_token, _token_expiry
     
-    config = Config()
-    TENANT_ID = config.GRAPH_TENANT_ID
-    CLIENT_ID = config.GRAPH_CLIENT_ID
-    CLIENT_SECRET = config.GRAPH_CLIENT_SECRET
+    try:
+        config = Config()
+        TENANT_ID = config.GRAPH_TENANT_ID
+        CLIENT_ID = config.GRAPH_CLIENT_ID
+        CLIENT_SECRET = config.GRAPH_CLIENT_SECRET
 
-    # Хэрвээ token хүчинтэй байвал cache-аас буцаана
-    if _cached_token and time.time() < _token_expiry - 10:
+        # Credentials шалгах
+        if not all([TENANT_ID, CLIENT_ID, CLIENT_SECRET]):
+            print("❌ Graph API credentials дутуу байна")
+            return None
+
+        # Хэрвээ token хүчинтэй байвал cache-аас буцаана
+        if _cached_token and time.time() < _token_expiry - 10:
+            return _cached_token
+
+        url = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
+        headers = { "Content-Type": "application/x-www-form-urlencoded" }
+        data = {
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+            "scope": "https://graph.microsoft.com/.default",
+            "grant_type": "client_credentials"
+        }
+
+        response = requests.post(url, headers=headers, data=data, timeout=10)
+        if response.status_code != 200:
+            print("❌ Access token авахад алдаа гарлаа:")
+            print("Status code:", response.status_code)
+            print("Response:", response.text)
+            return None
+
+        token_data = response.json()
+        _cached_token = token_data["access_token"]
+        _token_expiry = time.time() + token_data.get("expires_in", 3600)
+
         return _cached_token
-
-    url = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
-    headers = { "Content-Type": "application/x-www-form-urlencoded" }
-    data = {
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-        "scope": "https://graph.microsoft.com/.default",
-        "grant_type": "client_credentials"
-    }
-
-    response = requests.post(url, headers=headers, data=data)
-    if response.status_code != 200:
-        print("❌ Access token авахад алдаа гарлаа:")
-        print("Status code:", response.status_code)
-        print("Response:", response.text)
-        raise Exception("Access token авахад амжилтгүй боллоо")
-
-    token_data = response.json()
-    _cached_token = token_data["access_token"]
-    _token_expiry = time.time() + token_data.get("expires_in", 3600)
-
-    return _cached_token
+        
+    except Exception as e:
+        print(f"❌ Token авахад алдаа: {str(e)}")
+        return None
 
 class PlannerService:
     """Service to interact with Microsoft Graph API for planner tasks"""
@@ -52,81 +62,109 @@ class PlannerService:
     def __init__(self):
         self.base_url = "https://graph.microsoft.com/v1.0"
         self.access_token = get_access_token()
-        self.headers = {
-            "Authorization": f"Bearer {self.access_token}",
-            "Content-Type": "application/json"
-        }
+        
+        if not self.access_token:
+            print("⚠️ Graph API token авахад алдаа гарлаа")
+            self.headers = None
+        else:
+            self.headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json"
+            }
 
     def get_user_incomplete_tasks(self, user_email: str) -> List[Dict]:
         """Тодорхой хэрэглэгчийн дутуу tasks авах"""
-        url = f"{self.base_url}/users/{user_email}/planner/tasks"
         
-        response = requests.get(url, headers=self.headers)
-        
-        if response.status_code != 200:
-            print(f"❌ User tasks авахад алдаа гарлаа:")
-            print("Status code:", response.status_code)
-            print("Response:", response.text)
+        if not self.headers:
+            print("❌ Graph API headers алга байна")
             return []
-        
-        tasks = response.json().get("value", [])
-        
-        # Filter incomplete tasks (less than 100% complete)
-        incomplete_tasks = []
-        for task in tasks:
-            if task.get("percentComplete", 0) < 100:
-                incomplete_tasks.append({
-                    "id": task.get("id"),
-                    "title": task.get("title"),
-                    "planTitle": "Planner Task",
-                    "dueDateTime": task.get("dueDateTime"),
-                    "percentComplete": task.get("percentComplete", 0),
-                    "priority": task.get("priority", 5),
-                    "createdDateTime": task.get("createdDateTime")
-                })
-        
-        return incomplete_tasks
+            
+        try:
+            url = f"{self.base_url}/users/{user_email}/planner/tasks"
+            response = requests.get(url, headers=self.headers, timeout=10)
+            
+            if response.status_code != 200:
+                print(f"❌ User tasks авахад алдаа гарлаа:")
+                print("Status code:", response.status_code)
+                print("Response:", response.text[:200])
+                return []
+            
+            tasks = response.json().get("value", [])
+            
+            # Filter incomplete tasks (less than 100% complete)
+            incomplete_tasks = []
+            for task in tasks:
+                if task.get("percentComplete", 0) < 100:
+                    incomplete_tasks.append({
+                        "id": task.get("id"),
+                        "title": task.get("title"),
+                        "planTitle": "Planner Task",
+                        "dueDateTime": task.get("dueDateTime"),
+                        "percentComplete": task.get("percentComplete", 0),
+                        "priority": task.get("priority", 5),
+                        "createdDateTime": task.get("createdDateTime")
+                    })
+            
+            return incomplete_tasks
+            
+        except Exception as e:
+            print(f"❌ User tasks авахад алдаа: {str(e)}")
+            return []
 
     def get_personal_tasks(self, user_email: str) -> List[Dict]:
         """Microsoft To-Do tasks авах"""
-        # Get user's to-do lists
-        lists_url = f"{self.base_url}/users/{user_email}/todo/lists"
-        response = requests.get(lists_url, headers=self.headers)
         
-        if response.status_code != 200:
-            print(f"❌ To-Do lists авахад алдаа гарлаа:")
-            print("Status code:", response.status_code)
+        if not self.headers:
+            print("❌ Graph API headers алга байна")
             return []
-        
-        task_lists = response.json().get("value", [])
-        incomplete_tasks = []
-        
-        # Get tasks from each list
-        for task_list in task_lists:
-            list_id = task_list.get("id")
-            list_name = task_list.get("displayName")
             
-            if list_id:
-                tasks_url = f"{self.base_url}/users/{user_email}/todo/lists/{list_id}/tasks"
-                tasks_response = requests.get(tasks_url, headers=self.headers)
+        try:
+            # Get user's to-do lists
+            lists_url = f"{self.base_url}/users/{user_email}/todo/lists"
+            response = requests.get(lists_url, headers=self.headers, timeout=10)
+            
+            if response.status_code != 200:
+                print(f"❌ To-Do lists авахад алдаа гарлаа:")
+                print("Status code:", response.status_code)
+                return []
+            
+            task_lists = response.json().get("value", [])
+            incomplete_tasks = []
+            
+            # Get tasks from each list
+            for task_list in task_lists:
+                list_id = task_list.get("id")
+                list_name = task_list.get("displayName")
                 
-                if tasks_response.status_code == 200:
-                    tasks = tasks_response.json().get("value", [])
-                    
-                    # Filter incomplete tasks
-                    for task in tasks:
-                        if task.get("status") != "completed":
-                            incomplete_tasks.append({
-                                "id": task.get("id"),
-                                "title": task.get("title"),
-                                "listName": list_name,
-                                "dueDateTime": task.get("dueDateTime", {}).get("dateTime") if task.get("dueDateTime") else None,
-                                "importance": task.get("importance"),
-                                "createdDateTime": task.get("createdDateTime"),
-                                "status": task.get("status")
-                            })
-        
-        return incomplete_tasks
+                if list_id:
+                    try:
+                        tasks_url = f"{self.base_url}/users/{user_email}/todo/lists/{list_id}/tasks"
+                        tasks_response = requests.get(tasks_url, headers=self.headers, timeout=10)
+                        
+                        if tasks_response.status_code == 200:
+                            tasks = tasks_response.json().get("value", [])
+                            
+                            # Filter incomplete tasks
+                            for task in tasks:
+                                if task.get("status") != "completed":
+                                    incomplete_tasks.append({
+                                        "id": task.get("id"),
+                                        "title": task.get("title"),
+                                        "listName": list_name,
+                                        "dueDateTime": task.get("dueDateTime", {}).get("dateTime") if task.get("dueDateTime") else None,
+                                        "importance": task.get("importance"),
+                                        "createdDateTime": task.get("createdDateTime"),
+                                        "status": task.get("status")
+                                    })
+                    except Exception as e:
+                        print(f"❌ List {list_name} tasks авахад алдаа: {str(e)}")
+                        continue
+            
+            return incomplete_tasks
+            
+        except Exception as e:
+            print(f"❌ Personal tasks авахад алдаа: {str(e)}")
+            return []
 
     def get_all_tasks_from_plan(self, plan_id: str) -> List[Dict]:
         """Тодорхой plan-аас бүх tasks авах"""
