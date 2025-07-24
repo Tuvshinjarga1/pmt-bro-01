@@ -36,40 +36,34 @@ class LeaveRequestService:
             
             # NLP prompt for leave request detection
             prompt = f"""
-            Дараах мессежийг шинжилж, энэ нь чөлөөний хүсэлт эсэхийг тодорхойлно уу:
+            Монгол хэл болон транслит дээрх дараах мессежийг шинжилж, энэ нь чөлөөний хүсэлт эсэхийг тодорхой болгоно уу:
 
             Мессеж: "{message}"
 
-            Энгийн шинжилгээ хий:
-            - "chuluu", "чөлөө", "амралт", "өвчин" гэх үгс байна уу?
-            - "margaash", "маргааш" гэх огноо байна уу?
-            - Энгийн шалтгаан дурдсан уу?
-
-            JSON форматаар буцаа:
-            {{
-                "is_leave_request": true/false,
-                "start_date": "маргаашийн огноо эсвэл огноогүй",
-                "end_date": "маргаашийн огноо эсвэл огноогүй", 
-                "reason": "дурдсан шалтгаан эсвэл 'энгийн чөлөө'",
-                "in_active_hours": 8.0,
-                "confidence": 0.9,
-                "missing_info": []
-            }}
-
-            Жишээ:
-            - "margaash chuluu avmaar huviin shaltgaanaar" → 
+            Хэрэв энэ нь чөлөөний хүсэлт бол дараах мэдээллийг JSON форматаар буцаана:
             {{
                 "is_leave_request": true,
-                "start_date": "маргааш", 
-                "end_date": "маргааш",
-                "reason": "хувийн шалтгаан",
+                "start_date": "YYYY-MM-DD",
+                "end_date": "YYYY-MM-DD", 
+                "reason": "шалтгаан",
                 "in_active_hours": 8.0,
                 "confidence": 0.95,
                 "missing_info": []
             }}
 
-            Хэрэв чөлөө биш бол: {{"is_leave_request": false, "confidence": 0.1}}
-            Зөвхөн JSON буцаа.
+            Хэрэв чөлөөний хүсэлт биш бол:
+            {{
+                "is_leave_request": false,
+                "confidence": 0.1
+            }}
+
+            Анхаарах зүйлс:
+            - Монгол: "чөлөө", "амралт", "өвчин", "гарах", "хүсэлт"
+            - Транслит: "chuluu", "chuluu avmaar", "amralt", "ovchiin", "garах" 
+            - Цаг: "8tsagiin", "1 хоног", "өдөр", "tsag"
+            - Огноо: "маргааш"="margaash", "өнөөдөр"="unuudur", "nөгөөдөр"
+            - Хэрэв мэдээлэл дутуу бол missing_info массивт оруулах: ["start_date", "end_date", "reason"]
+            - Зөвхөн JSON буцаана, бусад тайлбар бүү нэм
             """
             
             response = client.chat.completions.create(
@@ -130,16 +124,6 @@ class LeaveRequestService:
             # Хэрэв end_date алга бол start_date-тай ижил болгох
             if not result.get("end_date") and result.get("start_date"):
                 result["end_date"] = result["start_date"]
-            
-            # Missing info шалгах логик сайжруулах
-            missing = []
-            if not result.get("start_date") or result.get("start_date") == "огноогүй":
-                missing.append("start_date")
-            if not result.get("reason") or result.get("reason") == "энгийн чөлөө":
-                # Хувийн шалтгаан гэж дурдсан бол хангалттай
-                pass
-            
-            result["missing_info"] = missing
                 
             # in_active_hours тооцоолох
             if result.get("start_date") and result.get("end_date"):
@@ -231,11 +215,7 @@ class LeaveRequestService:
         
         try:
             today = datetime.now()
-            date_lower = date_str.lower().strip()
-            
-            # Хэрэв аль хэдийн YYYY-MM-DD формат бол шууд буцаах
-            if re.match(r'\d{4}-\d{2}-\d{2}', date_str):
-                return date_str
+            date_lower = date_str.lower()
             
             # Монгол хэл
             if "өнөөдөр" in date_lower or "unuudur" in date_lower:
@@ -254,21 +234,22 @@ class LeaveRequestService:
     def generate_follow_up_questions(self, missing_info: List[str]) -> str:
         """Дутуу мэдээллийн төлөө лавлах асуултууд үүсгэх"""
         
-        # Зөвхөн чухал мэдээлэл дутуу үед л асуух
-        critical_missing = []
+        questions = []
         
         if "start_date" in missing_info:
-            critical_missing.append("📅 Хэзээнээс эхлэх вэ?")
+            questions.append("📅 Хэзээнээс эхлэх вэ?")
+            
+        if "end_date" in missing_info:
+            questions.append("📅 Хэзээ хүртэл вэ?")
             
         if "reason" in missing_info:
-            critical_missing.append("📝 Ямар шалтгаантай вэ?")
+            questions.append("📝 Ямар шалтгаантай вэ?")
         
-        # Хэрэв зөвхөн end_date дутуу бол start_date-тай ижил болгох
-        if not critical_missing:
+        if not questions:
             return ""
             
-        header = "🤔 **Нэмэлт мэдээлэл хэрэгтэй:**\n\n"
-        question_text = "\n".join(f"• {q}" for q in critical_missing)
-        footer = "\n\n💡 *Энгийнээр хариулна уу*"
+        header = "🤔 **Нэмэлт мэдээлэл хэрэгтэй байна:**\n\n"
+        question_text = "\n".join(f"• {q}" for q in questions)
+        footer = "\n\n💡 *Эдгээр мэдээллийг дахин бичээд илгээнэ үү.*"
         
         return header + question_text + footer 

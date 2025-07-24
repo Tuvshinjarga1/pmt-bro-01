@@ -14,7 +14,6 @@ _token_expiry = 0
 def get_access_token() -> str:
     """Get access token using client credentials"""
     global _cached_token, _token_expiry
-    
     try:
         config = Config()
         TENANT_ID = config.GRAPH_TENANT_ID
@@ -51,7 +50,6 @@ def get_access_token() -> str:
         _token_expiry = time.time() + token_data.get("expires_in", 3600)
 
         return _cached_token
-        
     except Exception as e:
         print(f"❌ Token авахад алдаа: {str(e)}")
         return None
@@ -78,7 +76,7 @@ class PlannerService:
         if not self.headers:
             print("❌ Graph API headers алга байна")
             return []
-            
+        
         try:
             url = f"{self.base_url}/users/{user_email}/planner/tasks"
             response = requests.get(url, headers=self.headers, timeout=10)
@@ -106,7 +104,6 @@ class PlannerService:
                     })
             
             return incomplete_tasks
-            
         except Exception as e:
             print(f"❌ User tasks авахад алдаа: {str(e)}")
             return []
@@ -117,7 +114,7 @@ class PlannerService:
         if not self.headers:
             print("❌ Graph API headers алга байна")
             return []
-            
+        
         try:
             # Get user's to-do lists
             lists_url = f"{self.base_url}/users/{user_email}/todo/lists"
@@ -161,24 +158,26 @@ class PlannerService:
                         continue
             
             return incomplete_tasks
-            
         except Exception as e:
             print(f"❌ Personal tasks авахад алдаа: {str(e)}")
             return []
 
     def get_all_tasks_from_plan(self, plan_id: str) -> List[Dict]:
         """Тодорхой plan-аас бүх tasks авах"""
-        url = f"{self.base_url}/planner/plans/{plan_id}/tasks"
-        
-        response = requests.get(url, headers=self.headers)
-        
-        if response.status_code != 200:
-            print(f"❌ Plan tasks авахад алдаа гарлаа:")
-            print("Status code:", response.status_code)
-            print("Response:", response.text)
+        try:
+            url = f"{self.base_url}/planner/plans/{plan_id}/tasks"
+            response = requests.get(url, headers=self.headers)
+            
+            if response.status_code != 200:
+                print(f"❌ Plan tasks авахад алдаа гарлаа:")
+                print("Status code:", response.status_code)
+                print("Response:", response.text)
+                return []
+            
+            return response.json().get("value", [])
+        except Exception as e:
+            print(f"❌ Plan tasks авахад алдаа: {str(e)}")
             return []
-        
-        return response.json().get("value", [])
 
     def format_tasks_for_display(self, planner_tasks: List[Dict], personal_tasks: List[Dict]) -> str:
         """Даалгаваруудыг харуулахад тохиромжтой форматаар бэлтгэх"""
