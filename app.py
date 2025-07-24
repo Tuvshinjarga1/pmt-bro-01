@@ -8,6 +8,9 @@ from dotenv import load_dotenv
 import asyncio
 # Planner service нэмж байна
 from planner_service import PlannerService
+# Leave request болон Teams messaging services
+from leave_request_service import LeaveRequestService
+from teams_auth_service import TeamsAuthService
 
 # Logging тохиргоо
 logging.basicConfig(level=logging.INFO)
@@ -123,27 +126,75 @@ def process_messages():
                     else:
                         logger.info("No valid user email found, skipping planner tasks check")
                     
-                    # OpenAI API key шалгах
-                    if not openai.api_key:
-                        logger.warning("OpenAI API key not configured")
-                        await context.send_activity("OpenAI API key тохируулаагүй байна.")
-                        return
+                    # NLP ашиглан чөлөөний хүсэлт шалгах
+                    leave_request_processed = False
+                    if user_email and user_email != "unknown_user":
+                        try:
+                            logger.info(f"Analyzing message for leave request: {user_text[:100]}...")
+                            leave_service = LeaveRequestService()
+                            leave_analysis = leave_service.analyze_message_for_leave_request(user_text, user_email)
+                            
+                            if leave_analysis and leave_analysis.get("is_leave_request", False):
+                                confidence = leave_analysis.get("confidence", 0.0)
+                                logger.info(f"Leave request detected with confidence: {confidence}")
+                                
+                                # Лидэрт Teams мессеж илгээх
+                                teams_service = TeamsAuthService()
+                                success = teams_service.send_leave_request_to_manager(leave_analysis)
+                                
+                                if success:
+                                    await context.send_activity(
+                                        f"🏖️ **Чөлөөний хүсэлт илгээгдлээ!**\n\n"
+                                        f"📋 **Мэдээлэл:**\n"
+                                        f"📅 Эхлэх өдөр: {leave_analysis.get('start_date', 'Тодорхойгүй')}\n"
+                                        f"📅 Дуусах өдөр: {leave_analysis.get('end_date', 'Тодорхойгүй')}\n"
+                                        f"⏰ Нийт цаг: {leave_analysis.get('in_active_hours', 8.0)} цаг\n"
+                                        f"📝 Шалтгаан: {leave_analysis.get('reason', 'Дурдаагүй')}\n\n"
+                                        f"✅ Таны хүсэлт лидэрт илгээгдлээ. Хариулт хүлээж байна уу.\n\n---\n"
+                                    )
+                                    leave_request_processed = True
+                                else:
+                                    await context.send_activity("⚠️ Чөлөөний хүсэлт илгээхэд алдаа гарлаа.\n\n---\n")
+                            else:
+                                logger.info("No leave request detected in message")
+                                
+                        except Exception as e:
+                            logger.error(f"Error analyzing leave request: {str(e)}")
                     
-                    try:
-                        # OpenAI API дуудах (шинэ format)
-                        client = openai.OpenAI(api_key=openai.api_key)
-                        response = client.chat.completions.create(
-                            model="gpt-3.5-turbo",
-                            messages=[{"role": "user", "content": user_text}]
-                        )
+                    # AI хариулт (хэрэв чөлөөний хүсэлт биш эсвэл нэмэлт асуулт байвал)
+                    if not leave_request_processed:
+                        # OpenAI API key шалгах
+                        if not openai.api_key:
+                            logger.warning("OpenAI API key not configured")
+                            await context.send_activity("OpenAI API key тохируулаагүй байна.")
+                            return
                         
-                        ai_response = response.choices[0].message.content
-                        logger.info(f"OpenAI response: {ai_response[:100]}...")
-                        await context.send_activity(f"🤖 **AI хариулт:**\n{ai_response}")
-                        
-                    except Exception as e:
-                        logger.error(f"OpenAI API error: {str(e)}")
-                        await context.send_activity(f"OpenAI API алдаа: {str(e)}")
+                        try:
+                            # OpenAI API дуудах (шинэ format)
+                            client = openai.OpenAI(api_key=openai.api_key)
+                            
+                            # Хэрэв чөлөөний хүсэлт танигдсан ч нэмэлт асуулт байвал тэмдэглэх
+                            system_message = """Та хэрэглэгчийн асистент бот байна. Монгол хэлээр хариулна уу. 
+                            Хэрэв хэрэглэгч чөлөөний талаар асуувал дэмжлэг үзүүлж, туслах мэдээлэл өгнө үү."""
+                            
+                            response = client.chat.completions.create(
+                                model="gpt-3.5-turbo",
+                                messages=[
+                                    {"role": "system", "content": system_message},
+                                    {"role": "user", "content": user_text}
+                                ],
+                                temperature=0.7
+                            )
+                            
+                            ai_response = response.choices[0].message.content
+                            logger.info(f"OpenAI response: {ai_response[:100]}...")
+                            await context.send_activity(f"🤖 **AI хариулт:**\n{ai_response}")
+                            
+                        except Exception as e:
+                            logger.error(f"OpenAI API error: {str(e)}")
+                            await context.send_activity(f"OpenAI API алдаа: {str(e)}")
+                    else:
+                        logger.info("Leave request processed, skipping AI response")
                         
                 else:
                     logger.info(f"Non-message activity type: {activity.type}")
