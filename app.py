@@ -175,10 +175,10 @@ def process_messages():
                             
                             # Хэрэв чөлөөний хүсэлт танигдсан ч нэмэлт асуулт байвал тэмдэглэх
                             system_message = """Та хэрэглэгчийн асистент бот байна. Монгол хэлээр хариулна уу. 
-                            Хэрэв хэрэглэгч чөлөөний талаар асуувал дэмжлэг үзүүлж, туслах мэдээлэл өгнө үү."""
+                            Хэрэв хэрэглэгч чөлөөний талаар асуувал дэмжлэг үзүүлж, туслах мэдээлэл өгнө үү. 'chuluu=чөлөө'"""
                             
                             response = client.chat.completions.create(
-                                model="gpt-3.5-turbo",
+                                model="gpt-4",
                                 messages=[
                                     {"role": "system", "content": system_message},
                                     {"role": "user", "content": user_text}
@@ -188,7 +188,7 @@ def process_messages():
                             
                             ai_response = response.choices[0].message.content
                             logger.info(f"OpenAI response: {ai_response[:100]}...")
-                            await context.send_activity(f"🤖 **AI хариулт:**\n{ai_response}")
+                            await context.send_activity(f"\n{ai_response}")
                             
                         except Exception as e:
                             logger.error(f"OpenAI API error: {str(e)}")
