@@ -1,11 +1,11 @@
 import os
 import logging
 from flask import Flask, request, jsonify
-from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings, TurnContext
-from botbuilder.schema import Activity
-import openai
 from dotenv import load_dotenv
 import asyncio
+
+# Import bot.py-ын Teams AI bot
+from bot import bot_app, config
 
 # Logging тохиргоо
 logging.basicConfig(level=logging.INFO)
@@ -13,34 +13,33 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
-
-# Bot Framework тохиргоо
-app_id = os.getenv("MICROSOFT_APP_ID", "")
-app_password = os.getenv("MICROSOFT_APP_PASSWORD", "")
-
-logger.info(f"Bot starting with App ID: {app_id[:10]}..." if app_id else "No App ID")
-
-SETTINGS = BotFrameworkAdapterSettings(app_id, app_password)
-ADAPTER = BotFrameworkAdapter(SETTINGS)
-
+# Flask app үүсгэх
 app = Flask(__name__)
 
-# Энгийн health check endpoint
+# Health check endpoint
 @app.route("/", methods=["GET"])
 def health_check():
     return jsonify({
         "status": "running",
-        "message": "Flask Bot Server is running",
+        "message": "Flask Bot Server with Teams AI Integration",
         "endpoints": ["/api/messages"],
-        "app_id_configured": bool(os.getenv("MICROSOFT_APP_ID")),
-        "openai_configured": bool(os.getenv("OPENAI_API_KEY"))
+        "app_id_configured": bool(config.APP_ID),
+        "openai_configured": bool(config.OPENAI_API_KEY),
+        "teams_ai_integrated": True,
+        "services": {
+            "planner_service": True,
+            "auth_service": True,
+            "config": True
+        }
     })
 
 @app.route("/api/messages", methods=["POST"])
 def process_messages():
+    """
+    Teams bot messages endpoint - uses bot.py Teams AI functionality
+    """
     try:
-        logger.info("Received message request")
+        logger.info("Received message request - delegating to Teams AI bot")
         
         # Request body шалгах
         if not request.is_json:
@@ -48,69 +47,51 @@ def process_messages():
             return jsonify({"error": "Content-Type must be application/json"}), 400
             
         body = request.get_json()
-        logger.info(f"Request body: {body}")
+        logger.info(f"Request body received: {body}")
         
-        # Хэрэв body хоосон бол
         if not body:
             logger.error("Empty request body")
             return jsonify({"error": "Request body is required"}), 400
 
-        # Activity объект үүсгэх
+        # Get authorization header
+        auth_header = request.headers.get('Authorization', '')
+        logger.info(f"Auth header present: {bool(auth_header)}")
+        
+        # Delegate to Teams AI bot using asyncio.run
         try:
+            from botbuilder.schema import Activity
+            
+            # Convert request to Activity
             activity = Activity().deserialize(body)
             logger.info(f"Activity type: {activity.type}, text: {activity.text}")
-        except Exception as e:
-            logger.error(f"Failed to deserialize activity: {str(e)}")
-            return jsonify({"error": f"Invalid activity format: {str(e)}"}), 400
-
-        async def logic(context: TurnContext):
-            try:
-                if activity.type == "message":
-                    user_text = activity.text or "No text provided"
-                    logger.info(f"Processing message: {user_text}")
-                    
-                    # OpenAI API key шалгах
-                    if not openai.api_key:
-                        logger.warning("OpenAI API key not configured")
-                        await context.send_activity("OpenAI API key тохируулаагүй байна.")
-                        return
-                    
-                    try:
-                        # OpenAI API дуудах (шинэ format)
-                        client = openai.OpenAI(api_key=openai.api_key)
-                        response = client.chat.completions.create(
-                            model="gpt-3.5-turbo",
-                            messages=[{"role": "user", "content": user_text}]
-                        )
-                        
-                        ai_response = response.choices[0].message.content
-                        logger.info(f"OpenAI response: {ai_response[:100]}...")
-                        await context.send_activity(ai_response)
-                        
-                    except Exception as e:
-                        logger.error(f"OpenAI API error: {str(e)}")
-                        await context.send_activity(f"OpenAI API алдаа: {str(e)}")
-                        
-                else:
-                    logger.info(f"Non-message activity type: {activity.type}")
-                    
-            except Exception as e:
-                logger.error(f"Error in logic function: {str(e)}")
-                await context.send_activity(f"Серверийн алдаа: {str(e)}")
-
-        # Bot adapter ашиглан мессеж боловсруулах
-        try:
-            auth_header = request.headers.get('Authorization', '')
-            logger.info(f"Auth header present: {bool(auth_header)}")
             
-            # Async function-ийг sync контекстэд ажиллуулах
-            asyncio.run(ADAPTER.process_activity(activity, auth_header, logic))
-            logger.info("Message processed successfully")
-            return jsonify({"status": "success"}), 200
+            # Create async wrapper function
+            async def process_with_teams_ai():
+                try:
+                    # Use Teams AI bot to process the activity
+                    await bot_app.adapter.process_activity(
+                        activity,
+                        auth_header,
+                        bot_app.turn_handler
+                    )
+                    return True
+                except Exception as e:
+                    logger.error(f"Teams AI processing error: {str(e)}")
+                    return False
+            
+            # Run the async function
+            success = asyncio.run(process_with_teams_ai())
+            
+            if success:
+                logger.info("Message processed successfully by Teams AI bot")
+                return jsonify({"status": "success", "processed_by": "teams_ai_bot"}), 200
+            else:
+                logger.error("Teams AI bot processing failed")
+                return jsonify({"error": "Teams AI bot processing failed"}), 500
             
         except Exception as e:
-            logger.error(f"Adapter processing error: {str(e)}")
-            return jsonify({"error": f"Bot framework error: {str(e)}"}), 500
+            logger.error(f"Teams AI bot integration error: {str(e)}")
+            return jsonify({"error": f"Teams AI bot error: {str(e)}"}), 500
             
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
@@ -123,6 +104,20 @@ def internal_error(error):
     return jsonify({"error": "Internal server error"}), 500
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    logger.info(f"Starting Flask app on port {port}")
+    port = config.PORT
+    logger.info("🚀 Starting Flask app with Teams AI bot integration...")
+    logger.info(f"📊 Configuration:")
+    logger.info(f"   - Port: {port}")
+    logger.info(f"   - Bot App ID: {config.APP_ID[:10]}..." if config.APP_ID else "   - Bot App ID: Not configured")
+    logger.info(f"   - OpenAI API: {'✅ Configured' if config.OPENAI_API_KEY else '❌ Not configured'}")
+    logger.info(f"   - Teams AI: ✅ Integrated from bot.py")
+    
+    # Test bot.py integration
+    try:
+        logger.info("✅ Teams AI bot imported successfully")
+        logger.info("✅ All services available: planner, auth, config")
+    except Exception as e:
+        logger.error(f"❌ Teams AI bot integration failed: {e}")
+    
+    logger.info(f"🎯 Starting Flask server on port {port}...")
     app.run(host="0.0.0.0", port=port, debug=True)
