@@ -183,12 +183,12 @@ def process_messages():
                                     {"role": "system", "content": system_message},
                                     {"role": "user", "content": user_text}
                                 ],
-                                temperature=0.7
+                                temperature=0.8
                             )
                             
                             ai_response = response.choices[0].message.content
                             logger.info(f"OpenAI response: {ai_response[:100]}...")
-                            await context.send_activity(f"\n{ai_response}")
+                            await context.send_activity(f"{ai_response}")
                             
                         except Exception as e:
                             logger.error(f"OpenAI API error: {str(e)}")
