@@ -1,3 +1,4 @@
+flask
 aiohttp
 botbuilder-core
 botbuilder-schema
