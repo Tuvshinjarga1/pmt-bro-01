@@ -5,3 +5,4 @@ botbuilder-schema
 openai
 python-dotenv
 gunicorn
+requests

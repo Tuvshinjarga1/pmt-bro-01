@@ -6,6 +6,8 @@ from botbuilder.schema import Activity
 import openai
 from dotenv import load_dotenv
 import asyncio
+# Planner service нэмж байна
+from planner_service import PlannerService
 
 # Logging тохиргоо
 logging.basicConfig(level=logging.INFO)
@@ -69,6 +71,50 @@ def process_messages():
                     user_text = activity.text or "No text provided"
                     logger.info(f"Processing message: {user_text}")
                     
+                    # Хэрэглэгчийн email хаяг олох (Teams-аас)
+                    user_email = None
+                    user_id = None
+                    
+                    if activity.from_property:
+                        # Teams-аас ирэх хэрэглэгчийн мэдээлэл
+                        user_id = getattr(activity.from_property, 'id', None)
+                        user_name = getattr(activity.from_property, 'name', None)
+                        aad_object_id = getattr(activity.from_property, 'aad_object_id', None)
+                        
+                        # UPN (User Principal Name) эсвэл email авах оролдлого
+                        if hasattr(activity.from_property, 'properties'):
+                            properties = getattr(activity.from_property, 'properties', {})
+                            user_email = properties.get('upn') or properties.get('email')
+                        
+                        # Хэрэв email олдоогүй бол AAD object ID эсвэл name ашиглах
+                        if not user_email:
+                            user_email = aad_object_id or user_name or user_id
+                    
+                    logger.info(f"User info - ID: {user_id}, Email: {user_email}")
+                    
+                    # Эхлээд planner tasks-уудыг шалгах
+                    tasks_message = ""
+                    if user_email:
+                        try:
+                            planner = PlannerService()
+                            
+                            # Planner болон personal tasks авах
+                            planner_tasks = planner.get_user_incomplete_tasks(user_email)
+                            personal_tasks = planner.get_personal_tasks(user_email)
+                            
+                            if planner_tasks or personal_tasks:
+                                tasks_message = planner.format_tasks_for_display(planner_tasks, personal_tasks)
+                                logger.info(f"Found {len(planner_tasks)} planner tasks and {len(personal_tasks)} personal tasks")
+                                
+                                # Эхлээд даалгавруудыг харуулах
+                                await context.send_activity(f"📋 **Таны дутуу даалгаврууд:**\n\n{tasks_message}\n\n---\n")
+                            else:
+                                await context.send_activity("✅ Танд дутуу даалгавар алга байна! 🎉\n\n---\n")
+                                
+                        except Exception as e:
+                            logger.error(f"Error getting planner tasks: {str(e)}")
+                            await context.send_activity("⚠️ Даалгавар шалгахад алдаа гарлаа.\n\n---\n")
+                    
                     # OpenAI API key шалгах
                     if not openai.api_key:
                         logger.warning("OpenAI API key not configured")
@@ -85,7 +131,7 @@ def process_messages():
                         
                         ai_response = response.choices[0].message.content
                         logger.info(f"OpenAI response: {ai_response[:100]}...")
-                        await context.send_activity(ai_response)
+                        await context.send_activity(f"🤖 **AI хариулт:**\n{ai_response}")
                         
                     except Exception as e:
                         logger.error(f"OpenAI API error: {str(e)}")
