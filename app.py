@@ -75,32 +75,38 @@ def process_messages():
                     user_email = None
                     user_id = None
                     
-                    if activity.from_property:
-                        # Teams-аас ирэх хэрэглэгчийн мэдээлэл
-                        user_id = getattr(activity.from_property, 'id', None)
-                        user_name = getattr(activity.from_property, 'name', None)
-                        aad_object_id = getattr(activity.from_property, 'aad_object_id', None)
+                    try:
+                        if activity.from_property:
+                            # Teams-аас ирэх хэрэглэгчийн мэдээлэл
+                            user_id = getattr(activity.from_property, 'id', None)
+                            user_name = getattr(activity.from_property, 'name', None)
+                            aad_object_id = getattr(activity.from_property, 'aad_object_id', None)
+                            
+                            # UPN (User Principal Name) эсвэл email авах оролдлого
+                            if hasattr(activity.from_property, 'properties'):
+                                properties = getattr(activity.from_property, 'properties', None)
+                                if properties and isinstance(properties, dict):
+                                    user_email = properties.get('upn') or properties.get('email')
+                            
+                            # Хэрэв email олдоогүй бол AAD object ID эсвэл name ашиглах
+                            if not user_email:
+                                user_email = aad_object_id or user_name or user_id
                         
-                        # UPN (User Principal Name) эсвэл email авах оролдлого
-                        if hasattr(activity.from_property, 'properties'):
-                            properties = getattr(activity.from_property, 'properties', {})
-                            user_email = properties.get('upn') or properties.get('email')
-                        
-                        # Хэрэв email олдоогүй бол AAD object ID эсвэл name ашиглах
-                        if not user_email:
-                            user_email = aad_object_id or user_name or user_id
-                    
-                    logger.info(f"User info - ID: {user_id}, Email: {user_email}")
+                        logger.info(f"User info - ID: {user_id}, Email: {user_email}")
+                    except Exception as e:
+                        logger.error(f"Error getting user info: {str(e)}")
+                        user_email = "unknown_user"
                     
                     # Эхлээд planner tasks-уудыг шалгах
                     tasks_message = ""
-                    if user_email:
+                    if user_email and user_email != "unknown_user":
                         try:
+                            logger.info(f"Getting planner tasks for user: {user_email}")
                             planner = PlannerService()
                             
                             # Planner болон personal tasks авах
-                            planner_tasks = planner.get_user_incomplete_tasks(user_email)
-                            personal_tasks = planner.get_personal_tasks(user_email)
+                            planner_tasks = planner.get_user_incomplete_tasks(user_email) or []
+                            personal_tasks = planner.get_personal_tasks(user_email) or []
                             
                             if planner_tasks or personal_tasks:
                                 tasks_message = planner.format_tasks_for_display(planner_tasks, personal_tasks)
@@ -114,6 +120,8 @@ def process_messages():
                         except Exception as e:
                             logger.error(f"Error getting planner tasks: {str(e)}")
                             await context.send_activity("⚠️ Даалгавар шалгахад алдаа гарлаа.\n\n---\n")
+                    else:
+                        logger.info("No valid user email found, skipping planner tasks check")
                     
                     # OpenAI API key шалгах
                     if not openai.api_key:
