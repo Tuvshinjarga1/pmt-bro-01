@@ -1,50 +1,83 @@
-import os
-import json
+"""
+Complete Teams Bot Implementation for Leave Request Approval
+with Proactive Messaging to Managers
+"""
+
 import asyncio
+import json
 from flask import Flask, request, jsonify
-from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings, TurnContext
-from botbuilder.schema import Activity
-
-MICROSOFT_APP_ID = os.getenv("MICROSOFT_APP_ID")
-MICROSOFT_APP_PASSWORD = os.getenv("MICROSOFT_APP_PASSWORD")
-
-SETTINGS = BotFrameworkAdapterSettings(MICROSOFT_APP_ID, MICROSOFT_APP_PASSWORD)
-ADAPTER = BotFrameworkAdapter(SETTINGS)
+from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings, TurnContext, MessageFactory
+from botbuilder.schema import ConversationReference
+import os
 
 app = Flask(__name__)
 
-CONV_REF_FILE = "conv_ref.json"
+# Ботын тохиргоо
+BOT_APP_ID = os.getenv("MICROSOFT_APP_ID")
+BOT_APP_PASSWORD = os.getenv("MICROSOFT_APP_PASSWORD")
+TEAMS_SERVICE_URL = "https://smba.trafficmanager.net/teams/"
+TEAMS_CHANNEL_ID = "msteams"
 
+settings = BotFrameworkAdapterSettings(app_id=BOT_APP_ID, app_password=BOT_APP_PASSWORD)
+adapter = BotFrameworkAdapter(settings)
+
+# 1. Teams-ээс мессеж ирэхэд conversation reference хадгалах endpoint
 @app.route("/api/messages", methods=["POST"])
 def messages():
-    body = request.get_json()
-    activity = Activity().deserialize(body)
-    conversation_reference = TurnContext.get_conversation_reference(activity)
-    # dict болгож хадгална!
-    with open(CONV_REF_FILE, "w", encoding="utf-8") as f:
-        json.dump(conversation_reference.dict(), f, ensure_ascii=False)
-    return jsonify({"status": "ok"})
+    if "application/json" in request.headers["Content-Type"]:
+        body = request.json
+    else:
+        return jsonify({"error": "Invalid content type"}), 400
 
-async def send_proactive_message(conversation_reference, message_text):
-    async def aux_func(turn_context: TurnContext):
-        await turn_context.send_activity(message_text)
-    await ADAPTER.continue_conversation(conversation_reference, aux_func, MICROSOFT_APP_ID)
+    activity = TurnContext.deserialize_activity(body)
+    reference = TurnContext.get_conversation_reference(activity)
+    # Лог болон файлд хадгална
+    print("==== CONVERSATION REFERENCE ====")
+    print(json.dumps(reference.serialize(), indent=2, ensure_ascii=False))
+    with open("conversation_reference.json", "w", encoding="utf-8") as f:
+        json.dump(reference.serialize(), f, ensure_ascii=False, indent=2)
 
-@app.route("/send_proactive", methods=["POST"])
-def send_proactive():
+    # ECHO: хэрэглэгчийн мессежийг буцааж илгээх
+    async def echo_callback(context: TurnContext):
+        await context.send_activity(MessageFactory.text(activity.text))
     try:
-        with open(CONV_REF_FILE, "r", encoding="utf-8") as f:
-            conversation_reference = json.load(f)
-    except Exception as e:
-        return jsonify({"error": f"Conversation reference олдсонгүй: {str(e)}"}), 400
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    loop.run_until_complete(
+        adapter.process_activity(activity, "", echo_callback)
+    )
+    return "", 200
 
-    data = request.get_json()
-    message_text = data.get("message", "hi, snu")
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(send_proactive_message(conversation_reference, message_text))
-    return jsonify({"result": "Proactive мессеж илгээгдлээ!"})
+# 2. Proactive мессеж илгээх endpoint
+async def send_proactive_message(message_text: str):
+    # Хадгалсан conversation reference-ийг уншина
+    with open("conversation_reference.json", "r", encoding="utf-8") as f:
+        ref_data = json.load(f)
+    conversation_reference = ConversationReference().deserialize(ref_data)
+    async def send_message_callback(context: TurnContext):
+        await context.send_activity(MessageFactory.text(message_text))
+    await adapter.continue_conversation(
+        conversation_reference,
+        send_message_callback,
+        BOT_APP_ID
+    )
+
+@app.route("/proactive-message", methods=["POST"])
+def proactive_message():
+    data = request.json
+    message_text = data.get("message", "Сайн байна уу!")
+    try:
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        loop.run_until_complete(send_proactive_message(message_text))
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(host="0.0.0.0", port=3978)
