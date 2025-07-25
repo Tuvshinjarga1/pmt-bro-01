@@ -14,6 +14,8 @@ CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 MICROSOFT_APP_ID = os.getenv("MICROSOFT_APP_ID")
 MICROSOFT_APP_PASSWORD = os.getenv("MICROSOFT_APP_PASSWORD")
 
+BOT_OBJECT_ID = os.getenv("BOT_OBJECT_ID")
+
 app = Flask(__name__)
 
 async def send_snu_message(user_email):
@@ -36,6 +38,11 @@ async def send_snu_message(user_email):
                     "@odata.type": "#microsoft.graph.aadUserConversationMember",
                     "roles": ["owner"],
                     "user@odata.bind": f"https://graph.microsoft.com/v1.0/users('{user_email}')"
+                },
+                {
+                    "@odata.type": "#microsoft.graph.aadUserConversationMember",
+                    "roles": ["owner"],
+                    "user@odata.bind": f"https://graph.microsoft.com/v1.0/users('{BOT_OBJECT_ID}')"
                 }
             ]
         }
