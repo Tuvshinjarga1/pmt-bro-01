@@ -1,31 +1,46 @@
+from flask import Flask, request, jsonify
 from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings, TurnContext
-from botbuilder.schema import Activity, ConversationReference
-import os, asyncio
+from botbuilder.schema import Activity
+import os, asyncio, json
 
-MICROSOFT_APP_ID = 'fbca8d51-1a7f-46f0-a634-8cf2d8344bb4'
-MICROSOFT_APP_PASSWORD = ''
+MICROSOFT_APP_ID = os.getenv("MICROSOFT_APP_ID")
+MICROSOFT_APP_PASSWORD = os.getenv("MICROSOFT_APP_PASSWORD")
 
 SETTINGS = BotFrameworkAdapterSettings(MICROSOFT_APP_ID, MICROSOFT_APP_PASSWORD)
 ADAPTER = BotFrameworkAdapter(SETTINGS)
 
-# Энэ conversation_reference-г хэрэглэгч танай бот руу анх бичихэд хадгалж авсан байх ёстой!
-conversation_reference = {
-    "channelId": "msteams",
-    "serviceUrl": "https://smba.trafficmanager.net/emea/",  # тухайн хэрэглэгчийн serviceUrl
-    "conversation": {"id": "<conversation_id>"},
-    "bot": {"id": MICROSOFT_APP_ID},
-    "user": {"id": "<user_aad_id>"}
-}
+app = Flask(__name__)
+
+# Conversation reference-г файлд хадгалах (эсвэл DB-д хадгалж болно)
+CONV_REF_FILE = "conv_ref.json"
+
+@app.route("/api/messages", methods=["POST"])
+def messages():
+    body = request.get_json()
+    activity = Activity().deserialize(body)
+    conversation_reference = TurnContext.get_conversation_reference(activity)
+    # Файлд хадгална
+    with open(CONV_REF_FILE, "w", encoding="utf-8") as f:
+        json.dump(conversation_reference, f, ensure_ascii=False)
+    return jsonify({"status": "ok"})
 
 async def send_proactive_message(conversation_reference, message_text):
     async def aux_func(turn_context: TurnContext):
         await turn_context.send_activity(message_text)
-    await ADAPTER.continue_conversation(ConversationReference(**conversation_reference), aux_func, MICROSOFT_APP_ID)
+    await ADAPTER.continue_conversation(conversation_reference, aux_func, MICROSOFT_APP_ID)
 
-# Flask endpoint-оос дуудах жишээ
-@app.route("/send_hi_snu", methods=["POST"])
-def send_hi_snu():
+@app.route("/send_proactive", methods=["POST"])
+def send_proactive():
+    # Хадгалсан conversation reference-г уншина
+    try:
+        with open(CONV_REF_FILE, "r", encoding="utf-8") as f:
+            conversation_reference = json.load(f)
+    except Exception as e:
+        return jsonify({"error": f"Conversation reference олдсонгүй: {str(e)}"}), 400
+
+    data = request.get_json()
+    message_text = data.get("message", "hi, snu")
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    result = loop.run_until_complete(send_proactive_message(conversation_reference, "hi, snu"))
-    return {"result": "Мессеж илгээгдсэн!"}
+    loop.run_until_complete(send_proactive_message(conversation_reference, message_text))
+    return jsonify({"result": "Proactive мессеж илгээгдлээ!"})
