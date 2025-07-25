@@ -371,7 +371,7 @@ def process_messages():
                     logger.info(f"Processing message from {user_name}: {user_text}")
                     
                     # GPT-4 ашиглан leave хүсэлтийг анализ хийх
-                    await context.send_activity("")
+                    await context.send_activity("🤖 Та түр хүлээнэ үү...")
                     
                     gpt_analysis = await analyze_leave_request_with_gpt(user_text)
                     
