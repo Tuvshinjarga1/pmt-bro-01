@@ -2,7 +2,7 @@ import os
 import logging
 from flask import Flask, request, jsonify
 from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings, TurnContext
-from botbuilder.schema import Activity, ChannelAccount, ConversationReference
+from botbuilder.schema import Activity
 import openai
 from dotenv import load_dotenv
 import asyncio
@@ -28,9 +28,6 @@ TENANT_ID = os.getenv("TENANT_ID")
 CLIENT_ID = os.getenv("CLIENT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 
-# Teams App ID (Azure Portal-аас авна)
-TEAMS_APP_ID = os.getenv("TEAMS_APP_ID", app_id)
-
 logger.info(f"Bot starting with App ID: {app_id[:10]}..." if app_id else "No App ID")
 
 SETTINGS = BotFrameworkAdapterSettings(app_id, app_password)
@@ -38,180 +35,8 @@ ADAPTER = BotFrameworkAdapter(SETTINGS)
 
 app = Flask(__name__)
 
-# In-memory storage for conversation references (production-д database ашиглана)
-conversation_references = {}
-
-async def install_bot_for_manager(manager_upn):
-    """Manager-д bot-ыг суулгах функц"""
-    logger.info(f"Installing bot for manager: {manager_upn}")
-    
-    credential = ClientSecretCredential(
-        tenant_id=TENANT_ID,
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
-    )
-    
-    try:
-        access_token = await credential.get_token("https://graph.microsoft.com/.default")
-        headers = {
-            "Authorization": f"Bearer {access_token.token}",
-            "Content-Type": "application/json"
-        }
-        
-        # Manager-д bot суулгах
-        install_url = f"https://graph.microsoft.com/v1.0/users/{manager_upn}/teamwork/installedApps"
-        install_data = {
-            "teamsApp@odata.bind": f"https://graph.microsoft.com/v1.0/appCatalogs/teamsApps/{app_id}"
-        }
-        
-        response = requests.post(install_url, headers=headers, json=install_data)
-        
-        if response.status_code == 201:
-            logger.info(f"Bot successfully installed for {manager_upn}")
-            return True
-        elif response.status_code == 409:
-            logger.info(f"Bot already installed for {manager_upn}")
-            return True
-        else:
-            logger.error(f"Bot installation failed: {response.status_code}")
-            logger.error(response.text)
-            return False
-            
-    except Exception as e:
-        logger.error(f"Error installing bot: {str(e)}")
-        return False
-    finally:
-        await credential.close()
-
-async def send_proactive_message_to_manager(manager_upn, manager_name, leave_request_text, gpt_analysis=None):
-    """Manager рүү proactive message илгээх функц"""
-    logger.info(f"Sending proactive message to manager: {manager_upn}")
-    
-    try:
-        # Bot суулгах оролдлого
-        install_success = await install_bot_for_manager(manager_upn)
-        
-        if not install_success:
-            return "Bot-ыг manager-д суулгаж чадсангүй."
-        
-        # Conversation reference үүсгэх (simplified approach)
-        # Production-д энэ нь bot framework-оор зохион байгуулагдана
-        manager_conversation_ref = ConversationReference(
-            channel_id="msteams",
-            service_url="https://smba.trafficmanager.net/amer/",
-            conversation={
-                "id": f"19:meeting_{manager_upn}@thread.v2"
-            },
-            user=ChannelAccount(
-                id=manager_upn,
-                name=manager_name
-            ),
-            bot=ChannelAccount(
-                id=app_id,
-                name="Leave Request Bot"
-            )
-        )
-        
-        # Adaptive Card үүсгэх
-        card_body = [
-            {
-                "type": "TextBlock",
-                "text": "🏖️ **Leave хүсэлт**",
-                "weight": "Bolder",
-                "size": "Medium"
-            },
-            {
-                "type": "TextBlock",
-                "text": f"**Хүсэлт:** {leave_request_text}",
-                "wrap": True
-            }
-        ]
-        
-        # GPT анализ нэмэх
-        if gpt_analysis:
-            card_body.extend([
-                {
-                    "type": "TextBlock",
-                    "text": f"**Төрөл:** {gpt_analysis.get('leave_type', 'тодорхойгүй')}",
-                    "wrap": True
-                },
-                {
-                    "type": "TextBlock", 
-                    "text": f"**Хугацаа:** {gpt_analysis.get('duration', 'тодорхойгүй')}",
-                    "wrap": True
-                },
-                {
-                    "type": "TextBlock",
-                    "text": f"**Шалтгаан:** {gpt_analysis.get('reason', 'тодорхойгүй')}",
-                    "wrap": True
-                },
-                {
-                    "type": "TextBlock",
-                    "text": f"**Яаралтай байдал:** {gpt_analysis.get('urgency', 'ердийн')}",
-                    "wrap": True
-                }
-            ])
-        
-        card_body.extend([
-            {
-                "type": "TextBlock",
-                "text": f"**Огноо:** {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')}",
-                "wrap": True
-            },
-            {
-                "type": "TextBlock",
-                "text": "Та энэ хүсэлтийг зөвшөөрөх үү?",
-                "wrap": True
-            }
-        ])
-
-        adaptive_card = {
-            "type": "AdaptiveCard",
-            "body": card_body,
-            "actions": [
-                {
-                    "type": "Action.Submit",
-                    "title": "✅ Зөвшөөрөх",
-                    "data": {"action": "approve"}
-                },
-                {
-                    "type": "Action.Submit",
-                    "title": "❌ Татгалзах",
-                    "data": {"action": "reject"}
-                }
-            ],
-            "version": "1.4"
-        }
-        
-        # Proactive message илгээх
-        async def send_message(turn_context: TurnContext):
-            attachment = {
-                "contentType": "application/vnd.microsoft.card.adaptive",
-                "content": adaptive_card
-            }
-            message = Activity(
-                type="message",
-                text="Leave хүсэлтийн шийдвэр",
-                attachments=[attachment]
-            )
-            await turn_context.send_activity(message)
-        
-        # Continue conversation ашиглан илгээх
-        await ADAPTER.continue_conversation(
-            manager_conversation_ref,
-            send_message,
-            app_id
-        )
-        
-        logger.info(f"Proactive message sent to {manager_name}")
-        return f"Таны leave хүсэлтийг {manager_name} менежер рүү Teams-ээр илгээлээ. ✅"
-        
-    except Exception as e:
-        logger.error(f"Error sending proactive message: {str(e)}")
-        return f"Proactive message илгээхэд алдаа: {str(e)}"
-
 async def send_manager_notification(user_email, leave_request_text, gpt_analysis=None):
-    """Менежер рүү leave хүсэлтийн мэдэгдэл илгээх функц (шинэчлэгдсэн)"""
+    """Менежер рүү leave хүсэлтийн мэдэгдэл илгээх функц"""
     logger.info(f"Sending manager notification for user: {user_email}")
     
     credential = ClientSecretCredential(
@@ -232,16 +57,188 @@ async def send_manager_notification(user_email, leave_request_text, gpt_analysis
             manager_name = result.display_name or manager_upn
             logger.info(f"Found manager: {manager_name} ({manager_upn})")
             
-            # Proactive message илгээх оролдлого
+            # Токен авах (шинэ credential үүсгэх)
+            token_credential = ClientSecretCredential(
+                tenant_id=TENANT_ID,
+                client_id=CLIENT_ID,
+                client_secret=CLIENT_SECRET,
+            )
+            
             try:
-                proactive_result = await send_proactive_message_to_manager(
-                    manager_upn, manager_name, leave_request_text, gpt_analysis
-                )
-                return proactive_result
-            except Exception as e:
-                logger.error(f"Proactive message failed: {str(e)}")
-                # Fallback: email эсвэл бусад арга ашиглах
-                return f"Manager-д бот суулгаж чадсангүй. Админаас Teams App permission шалгууулаарай."
+                access_token = await token_credential.get_token("https://graph.microsoft.com/.default")
+                headers = {
+                    "Authorization": f"Bearer {access_token.token}",
+                    "Content-Type": "application/json"
+                }
+
+                # Байгаа чатуудыг хайж олох оролдлого
+                logger.info("Looking for existing chats with manager...")
+                
+                # 1. Хэрэглэгчийн чатуудыг авах
+                chats_url = f"https://graph.microsoft.com/v1.0/users/{user_email}/chats"
+                chats_response = requests.get(chats_url, headers=headers)
+                
+                chat_id = None
+                
+                if chats_response.status_code == 200:
+                    chats_data = chats_response.json()
+                    logger.info(f"Found {len(chats_data.get('value', []))} chats")
+                    
+                    # Менежертэй 1:1 чат хайх
+                    for chat in chats_data.get('value', []):
+                        if chat.get('chatType') == 'oneOnOne':
+                            # Чатын гишүүдийг шалгах
+                            members_url = f"https://graph.microsoft.com/v1.0/chats/{chat['id']}/members"
+                            members_response = requests.get(members_url, headers=headers)
+                            
+                            if members_response.status_code == 200:
+                                members = members_response.json().get('value', [])
+                                for member in members:
+                                    if member.get('email') == manager_upn or member.get('userId') == result.id:
+                                        chat_id = chat['id']
+                                        logger.info(f"Found existing chat with manager: {chat_id}")
+                                        break
+                            if chat_id:
+                                break
+                
+                # 2. Хэрэв байгаа чат олдоогүй бол шинэ чат үүсгэх оролдлого
+                if not chat_id:
+                    logger.info("No existing chat found, attempting to create new chat...")
+                    
+                    chat_url = "https://graph.microsoft.com/v1.0/chats"
+                    chat_data = {
+                        "chatType": "oneOnOne",
+                        "members": [
+                            {
+                                "@odata.type": "#microsoft.graph.aadUserConversationMember",
+                                "roles": ["owner"],
+                                "user@odata.bind": f"https://graph.microsoft.com/v1.0/users('{manager_upn}')"
+                            },
+                            {
+                                "@odata.type": "#microsoft.graph.aadUserConversationMember", 
+                                "roles": ["owner"],
+                                "user@odata.bind": f"https://graph.microsoft.com/v1.0/users('{user_email}')"
+                            }
+                        ]
+                    }
+                    
+                    chat_response = requests.post(chat_url, headers=headers, json=chat_data)
+                    
+                    if chat_response.status_code == 201:
+                        chat_id = chat_response.json()["id"]
+                        logger.info(f"Created new chat: {chat_id}")
+                    else:
+                        logger.error(f"Chat creation failed: {chat_response.status_code}")
+                        logger.error(chat_response.text)
+                        return f"Чат үүсгэхэд алдаа: {chat_response.status_code}. Admin-аас Chat.Create permission хүсээрэй."
+                
+                # 3. Чатрүү Adaptive Card илгээх
+                if chat_id:
+                    # GPT анализын мэдээллийг Adaptive Card-д нэмэх
+                    card_body = [
+                        {
+                            "type": "TextBlock",
+                            "text": "🏖️ **Leave хүсэлт**",
+                            "weight": "Bolder",
+                            "size": "Medium"
+                        },
+                        {
+                            "type": "TextBlock",
+                            "text": f"**Хэрэглэгч:** {user_email}",
+                            "wrap": True
+                        },
+                        {
+                            "type": "TextBlock",
+                            "text": f"**Хүсэлт:** {leave_request_text}",
+                            "wrap": True
+                        }
+                    ]
+                    
+                    # Хэрэв GPT анализ байгаа бол нэмэлт мэдээлэл нэмэх
+                    if gpt_analysis:
+                        card_body.extend([
+                            {
+                                "type": "TextBlock",
+                                "text": f"**Төрөл:** {gpt_analysis.get('leave_type', 'тодорхойгүй')}",
+                                "wrap": True
+                            },
+                            {
+                                "type": "TextBlock", 
+                                "text": f"**Хугацаа:** {gpt_analysis.get('duration', 'тодорхойгүй')}",
+                                "wrap": True
+                            },
+                            {
+                                "type": "TextBlock",
+                                "text": f"**Шалтгаан:** {gpt_analysis.get('reason', 'тодорхойгүй')}",
+                                "wrap": True
+                            },
+                            {
+                                "type": "TextBlock",
+                                "text": f"**Яаралтай байдал:** {gpt_analysis.get('urgency', 'ердийн')}",
+                                "wrap": True
+                            }
+                        ])
+                    
+                    card_body.extend([
+                        {
+                            "type": "TextBlock",
+                            "text": f"**Огноо:** {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                            "wrap": True
+                        },
+                        {
+                            "type": "TextBlock",
+                            "text": "Та энэ хүсэлтийг зөвшөөрөх үү?",
+                            "wrap": True
+                        }
+                    ])
+
+                    adaptive_card_content = {
+                        "type": "AdaptiveCard",
+                        "body": card_body,
+                        "actions": [
+                            {
+                                "type": "Action.Submit",
+                                "title": "✅ Зөвшөөрөх",
+                                "data": {"action": "approve", "user_email": user_email}
+                            },
+                            {
+                                "type": "Action.Submit",
+                                "title": "❌ Татгалзах", 
+                                "data": {"action": "reject", "user_email": user_email}
+                            }
+                        ],
+                        "version": "1.4"
+                    }
+
+                    message_url = f"https://graph.microsoft.com/v1.0/chats/{chat_id}/messages"
+                    message_data = {
+                        "body": {
+                            "contentType": "html",
+                            "content": "Leave хүсэлтийн шийдвэр"
+                        },
+                        "attachments": [
+                            {
+                                "contentType": "application/vnd.microsoft.card.adaptive",
+                                "content": json.dumps(adaptive_card_content)
+                            }
+                        ]
+                    }
+                    
+                    logger.info("Sending Adaptive Card to chat...")
+                    message_response = requests.post(message_url, headers=headers, json=message_data)
+                    
+                    if message_response.status_code == 201:
+                        logger.info("Adaptive Card sent successfully!")
+                        return f"Таны leave хүсэлтийг {manager_name} менежер рүү Teams чатаар илгээлээ. ✅"
+                    else:
+                        logger.error(f"Message send error: {message_response.status_code}")
+                        logger.error(message_response.text)
+                        return "Teams мессеж илгээхэд алдаа гарлаа."
+                else:
+                    return "Teams чат олдсонгүй эсвэл үүсгэж чадсангүй."
+                    
+            finally:
+                await token_credential.close()
         else:
             logger.warning("Manager not found")
             return "Таны менежер олдсонгүй."
