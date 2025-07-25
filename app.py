@@ -9,8 +9,22 @@ from flask import Flask, request, jsonify
 from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings, TurnContext, MessageFactory
 from botbuilder.schema import ConversationReference
 import os
+import logging
+from datetime import datetime
 
 app = Flask(__name__)
+
+# Flask log тохиргоо
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
+
+@app.before_request
+def log_request_info():
+    logging.info(f"REQUEST: {request.method} {request.path}")
+    if request.data:
+        try:
+            logging.info(f"Request body: {request.data.decode('utf-8')}")
+        except Exception:
+            pass
 
 # Ботын тохиргоо
 BOT_APP_ID = os.getenv("MICROSOFT_APP_ID")
@@ -32,10 +46,14 @@ def messages():
     activity = TurnContext.deserialize_activity(body)
     reference = TurnContext.get_conversation_reference(activity)
     # Лог болон файлд хадгална
-    print("==== CONVERSATION REFERENCE ====")
-    print(json.dumps(reference.serialize(), indent=2, ensure_ascii=False))
+    logging.info("==== CONVERSATION REFERENCE ====")
+    logging.info(json.dumps(reference.serialize(), indent=2, ensure_ascii=False))
     with open("conversation_reference.json", "w", encoding="utf-8") as f:
         json.dump(reference.serialize(), f, ensure_ascii=False, indent=2)
+
+    # Activity дэлгэрэнгүй log
+    logging.info(f"Activity type: {getattr(activity, 'type', None)}")
+    logging.info(f"From: {getattr(activity.from_property, 'id', None)} | Text: {getattr(activity, 'text', None)}")
 
     # ECHO: хэрэглэгчийн мессежийг буцааж илгээх
     async def echo_callback(context: TurnContext):
