@@ -9,6 +9,7 @@ import asyncio
 from msgraph import GraphServiceClient
 from azure.identity.aio import ClientSecretCredential
 import requests
+import json
 
 # Logging тохиргоо
 logging.basicConfig(level=logging.INFO)
@@ -218,7 +219,7 @@ async def send_manager_notification(user_email, leave_request_text, gpt_analysis
                         "attachments": [
                             {
                                 "contentType": "application/vnd.microsoft.card.adaptive",
-                                "content": adaptive_card_content
+                                "content": json.dumps(adaptive_card_content)
                             }
                         ]
                     }
