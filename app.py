@@ -27,19 +27,27 @@ async def send_snu_message(user_email):
             "chatType": "oneOnOne",
             "members": [
                 {
+<<<<<<< HEAD
                     "@odata.type": "#microsoft.graph.aadUserConversationMember", 
+=======
+                    "@odata.type": "#microsoft.graph.aadUserConversationMember",
+>>>>>>> 0c55af86a0547c214a78ccce87983924274222c0
                     "roles": ["owner"],
                     "user@odata.bind": f"https://graph.microsoft.com/v1.0/users('{user_email}')"
                 }
             ]
         }
         chat_response = requests.post(chat_url, headers=headers, json=chat_data)
+<<<<<<< HEAD
         
+=======
+>>>>>>> 0c55af86a0547c214a78ccce87983924274222c0
         if chat_response.status_code in [201, 409]:
             chat_id = chat_response.json().get("id")
             if not chat_id:
                 return "Чат ID олдсонгүй"
         else:
+<<<<<<< HEAD
             # Дэлгэрэнгүй алдааны мэдээлэл харуулах
             try:
                 error_detail = chat_response.json()
@@ -47,6 +55,9 @@ async def send_snu_message(user_email):
             except:
                 return f"Чат үүсгэхэд алдаа: {chat_response.status_code} - {chat_response.text}"
         
+=======
+            return f"Чат үүсгэхэд алдаа: {chat_response.status_code}"
+>>>>>>> 0c55af86a0547c214a78ccce87983924274222c0
         message_url = f"https://graph.microsoft.com/v1.0/chats/{chat_id}/messages"
         message_data = {
             "body": {
@@ -55,6 +66,7 @@ async def send_snu_message(user_email):
             }
         }
         message_response = requests.post(message_url, headers=headers, json=message_data)
+<<<<<<< HEAD
         
         if message_response.status_code == 201:
             return "Мессеж амжилттай илгээгдлээ!"
@@ -65,6 +77,12 @@ async def send_snu_message(user_email):
                 return f"Мессеж илгээхэд алдаа: {message_response.status_code} - {error_detail}"
             except:
                 return f"Мессеж илгээхэд алдаа: {message_response.status_code} - {message_response.text}"
+=======
+        if message_response.status_code == 201:
+            return "Мессеж амжилттай илгээгдлээ!"
+        else:
+            return f"Мессеж илгээхэд алдаа: {message_response.status_code}"
+>>>>>>> 0c55af86a0547c214a78ccce87983924274222c0
     finally:
         await credential.close()
 
@@ -80,5 +98,9 @@ def send_snu():
     return jsonify({"result": result})
 
 if __name__ == "__main__":
+<<<<<<< HEAD
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port, debug=True)
+=======
+    app.run(host="0.0.0.0", port=8000, debug=True)
+>>>>>>> 0c55af86a0547c214a78ccce87983924274222c0
