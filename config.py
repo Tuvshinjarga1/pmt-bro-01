@@ -21,9 +21,9 @@ class Config:
     OPENAI_MODEL_NAME='gpt-4' # OpenAI model name. You can use any other model name from OpenAI.
     
     # Microsoft Graph API credentials
-    GRAPH_TENANT_ID = os.environ.get("GRAPH_TENANT_ID", "3fee1c11-7cdf-44b4-a1b0-5183408e1d89")
-    GRAPH_CLIENT_ID = os.environ.get("GRAPH_CLIENT_ID", "a6e958a7-e8df-4e83-a8c2-5dc73f93bdc4") 
-    GRAPH_CLIENT_SECRET = os.environ.get("GRAPH_CLIENT_SECRET")
+    TENANT_ID = os.environ.get("TENANT_ID", "3fee1c11-7cdf-44b4-a1b0-5183408e1d89")
+    CLIENT_ID = os.environ.get("CLIENT_ID", "a6e958a7-e8df-4e83-a8c2-5dc73f93bdc4") 
+    CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
 
     # Deployed server URLs
     AI_SERVER_URL = "https://ai-server-production-0014.up.railway.app"

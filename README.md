@@ -75,9 +75,9 @@ MICROSOFT_APP_ID=your_bot_app_id
 MICROSOFT_APP_PASSWORD=your_bot_password
 
 # Нэмэлт функцуудад
-GRAPH_TENANT_ID=your_azure_tenant_id
-GRAPH_CLIENT_ID=your_graph_client_id
-GRAPH_CLIENT_SECRET=your_graph_client_secret
+TENANT_ID=your_azure_tenant_id
+CLIENT_ID=your_CLIENT_ID
+CLIENT_SECRET=your_CLIENT_SECRET
 TEAMS_WEBHOOK_URL=your_teams_webhook_url
 ```
 

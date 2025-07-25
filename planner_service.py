@@ -16,9 +16,9 @@ def get_access_token() -> str:
     global _cached_token, _token_expiry
     try:
         config = Config()
-        TENANT_ID = config.GRAPH_TENANT_ID
-        CLIENT_ID = config.GRAPH_CLIENT_ID
-        CLIENT_SECRET = config.GRAPH_CLIENT_SECRET
+        TENANT_ID = config.TENANT_ID
+        CLIENT_ID = config.CLIENT_ID
+        CLIENT_SECRET = config.CLIENT_SECRET
 
         # Credentials шалгах
         if not all([TENANT_ID, CLIENT_ID, CLIENT_SECRET]):
