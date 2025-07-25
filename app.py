@@ -34,7 +34,7 @@ ADAPTER = BotFrameworkAdapter(SETTINGS)
 
 app = Flask(__name__)
 
-async def send_manager_notification(user_email, leave_request_text):
+async def send_manager_notification(user_email, leave_request_text, gpt_analysis=None):
     """Менежер рүү leave хүсэлтийн мэдэгдэл илгээх функц"""
     logger.info(f"Sending manager notification for user: {user_email}")
     
@@ -133,36 +133,67 @@ async def send_manager_notification(user_email, leave_request_text):
                 
                 # 3. Чатрүү Adaptive Card илгээх
                 if chat_id:
-                    adaptive_card_content = {
-                        "type": "AdaptiveCard",
-                        "body": [
+                    # GPT анализын мэдээллийг Adaptive Card-д нэмэх
+                    card_body = [
+                        {
+                            "type": "TextBlock",
+                            "text": "🏖️ **Leave хүсэлт**",
+                            "weight": "Bolder",
+                            "size": "Medium"
+                        },
+                        {
+                            "type": "TextBlock",
+                            "text": f"**Хэрэглэгч:** {user_email}",
+                            "wrap": True
+                        },
+                        {
+                            "type": "TextBlock",
+                            "text": f"**Хүсэлт:** {leave_request_text}",
+                            "wrap": True
+                        }
+                    ]
+                    
+                    # Хэрэв GPT анализ байгаа бол нэмэлт мэдээлэл нэмэх
+                    if gpt_analysis:
+                        card_body.extend([
                             {
                                 "type": "TextBlock",
-                                "text": "🏖️ **Leave хүсэлт**",
-                                "weight": "Bolder",
-                                "size": "Medium"
+                                "text": f"**Төрөл:** {gpt_analysis.get('leave_type', 'тодорхойгүй')}",
+                                "wrap": True
                             },
                             {
-                                "type": "TextBlock",
-                                "text": f"**Хэрэглэгч:** {user_email}",
+                                "type": "TextBlock", 
+                                "text": f"**Хугацаа:** {gpt_analysis.get('duration', 'тодорхойгүй')}",
                                 "wrap": True
                             },
                             {
                                 "type": "TextBlock",
-                                "text": f"**Хүсэлт:** {leave_request_text}",
+                                "text": f"**Шалтгаан:** {gpt_analysis.get('reason', 'тодорхойгүй')}",
                                 "wrap": True
                             },
                             {
                                 "type": "TextBlock",
-                                "text": f"**Огноо:** {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')}",
-                                "wrap": True
-                            },
-                            {
-                                "type": "TextBlock",
-                                "text": "Та энэ хүсэлтийг зөвшөөрөх үү?",
+                                "text": f"**Яаралтай байдал:** {gpt_analysis.get('urgency', 'ердийн')}",
                                 "wrap": True
                             }
-                        ],
+                        ])
+                    
+                    card_body.extend([
+                        {
+                            "type": "TextBlock",
+                            "text": f"**Огноо:** {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                            "wrap": True
+                        },
+                        {
+                            "type": "TextBlock",
+                            "text": "Та энэ хүсэлтийг зөвшөөрөх үү?",
+                            "wrap": True
+                        }
+                    ])
+
+                    adaptive_card_content = {
+                        "type": "AdaptiveCard",
+                        "body": card_body,
                         "actions": [
                             {
                                 "type": "Action.Submit",
@@ -217,8 +248,69 @@ async def send_manager_notification(user_email, leave_request_text):
     finally:
         await credential.close()
 
+async def analyze_leave_request_with_gpt(text):
+    """GPT-4 ашиглан leave хүсэлтийг ойлгох функц"""
+    if not text or not openai.api_key:
+        return None
+    
+    try:
+        client = openai.OpenAI(api_key=openai.api_key)
+        
+        prompt = f"""
+        Та хүний мэдрэмжтэй AI туслач юм. Дараах текстийг уншиж, энэ нь ажлаас чөлөө авах хүсэлт эсэхийг тодорхойлно уу.
+
+        Текст: "{text}"
+
+        Хэрэв энэ нь чөлөө авах хүсэлт бол JSON форматаар дараах мэдээллийг өгнө үү:
+        {{
+            "is_leave_request": true,
+            "leave_type": "амралт/өвчтэй/хувийн/гэр бүлийн/бусад",
+            "duration": "1 өдөр/хэдэн өдөр/тодорхойгүй",
+            "reason": "шалтгааны товч тайлбар",
+            "urgency": "яаралтай/ердийн/тодорхойгүй",
+            "processed_request": "Formal хэлбэрээр боловсруулсан хүсэлт"
+        }}
+
+        Хэрэв чөлөө авах хүсэлт биш бол:
+        {{
+            "is_leave_request": false
+        }}
+
+        Монгол хэл, транслит, англи хэлээр бичсэн хүсэлтийг бүгдийг ойлгоно уу.
+        """
+        
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3
+        )
+        
+        result_text = response.choices[0].message.content.strip()
+        
+        # JSON parse хийх
+        import json
+        try:
+            result = json.loads(result_text)
+            return result
+        except json.JSONDecodeError:
+            # Хэрэв JSON биш бол text-ээс is_leave_request-г хайх
+            if "true" in result_text.lower() and "leave" in result_text.lower():
+                return {
+                    "is_leave_request": True,
+                    "leave_type": "тодорхойгүй",
+                    "duration": "тодорхойгүй", 
+                    "reason": text,
+                    "urgency": "ердийн",
+                    "processed_request": text
+                }
+            return {"is_leave_request": False}
+            
+    except Exception as e:
+        logger.error(f"GPT analysis error: {str(e)}")
+        return None
+
 def is_leave_request(text):
-    """Leave хүсэлт эсэхийг шалгах функц"""
+    """Leave хүсэлт эсэхийг шалгах функц (fallback)"""
     if not text:
         return False
         
@@ -278,10 +370,34 @@ def process_messages():
                     
                     logger.info(f"Processing message from {user_name}: {user_text}")
                     
-                    # Leave хүсэлт эсэхийг шалгах
-                    if is_leave_request(user_text):
-                        logger.info("Leave request detected!")
-                        await context.send_activity("🏖️ Leave хүсэлт хүлээн авлаа. Менежер рүү илгээж байна...")
+                    # GPT-4 ашиглан leave хүсэлтийг анализ хийх
+                    await context.send_activity("🤖 Таны мессежийг анализ хийж байна...")
+                    
+                    gpt_analysis = await analyze_leave_request_with_gpt(user_text)
+                    
+                    if gpt_analysis and gpt_analysis.get("is_leave_request"):
+                        logger.info("Leave request detected by GPT-4!")
+                        
+                        # GPT-4-ээс ирсэн мэдээллийг ашиглах
+                        leave_type = gpt_analysis.get("leave_type", "тодорхойгүй")
+                        duration = gpt_analysis.get("duration", "тодорхойгүй")
+                        reason = gpt_analysis.get("reason", user_text)
+                        urgency = gpt_analysis.get("urgency", "ердийн")
+                        processed_request = gpt_analysis.get("processed_request", user_text)
+                        
+                        # Дэлгэрэнгүй мэдээлэл харуулах
+                        analysis_message = f"""
+✅ **Leave хүсэлт таныгдлаа!**
+
+📋 **Анализын дүн:**
+• **Төрөл:** {leave_type}
+• **Хугацаа:** {duration}  
+• **Шалтгаан:** {reason}
+• **Яаралтай байдал:** {urgency}
+
+🚀 Менежер рүү илгээж байна...
+                        """
+                        await context.send_activity(analysis_message.strip())
                         
                         # Хэрэв user email байхгүй бол default ашиглах
                         if not user_email:
@@ -289,14 +405,34 @@ def process_messages():
                             user_email = getattr(activity.from_property, 'email', None) or "tuvshinjargal@fibo.cloud"
                         
                         try:
-                            # Менежер рүү мэдэгдэл илгээх
-                            result = await send_manager_notification(user_email, user_text)
+                            # Менежер рүү дэлгэрэнгүй мэдэгдэл илгээх
+                            result = await send_manager_notification(user_email, processed_request, gpt_analysis)
                             await context.send_activity(result)
                         except Exception as e:
                             logger.error(f"Manager notification error: {str(e)}")
                             await context.send_activity(f"Менежер рүү мэдэгдэл илгээхэд алдаа: {str(e)}")
                         
                         return
+                    elif gpt_analysis is None:
+                        # GPT analysis амжилтгүй болсон тохиолдолд fallback ашиглах
+                        logger.warning("GPT analysis failed, using fallback method")
+                        if is_leave_request(user_text):
+                            logger.info("Leave request detected by fallback method!")
+                            await context.send_activity("🏖️ Leave хүсэлт хүлээн авлаа. Менежер рүү илгээж байна...")
+                            
+                            # Хэрэв user email байхгүй бол default ашиглах
+                            if not user_email:
+                                user_email = getattr(activity.from_property, 'email', None) or "tuvshinjargal@fibo.cloud"
+                            
+                            try:
+                                # Менежер рүү мэдэгдэл илгээх
+                                result = await send_manager_notification(user_email, user_text)
+                                await context.send_activity(result)
+                            except Exception as e:
+                                logger.error(f"Manager notification error: {str(e)}")
+                                await context.send_activity(f"Менежер рүү мэдэгдэл илгээхэд алдаа: {str(e)}")
+                            
+                            return
                     
                     # Хэрэв leave хүсэлт биш бол OpenAI ашиглах
                     if not openai.api_key:
