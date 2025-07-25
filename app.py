@@ -1,107 +1,128 @@
-"""
-Complete Teams Bot Implementation for Leave Request Approval
-with Proactive Messaging to Managers
-"""
-
-import asyncio
-import json
-from flask import Flask, request, jsonify
-from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings, TurnContext, MessageFactory
-from botbuilder.schema import ConversationReference
 import os
 import logging
-from datetime import datetime
+from flask import Flask, request, jsonify
+from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings, TurnContext
+from botbuilder.schema import Activity
+import openai
+from dotenv import load_dotenv
+import asyncio
+
+# Logging тохиргоо
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+load_dotenv()
+
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
+# Bot Framework тохиргоо
+app_id = os.getenv("MICROSOFT_APP_ID", "")
+app_password = os.getenv("MICROSOFT_APP_PASSWORD", "")
+
+logger.info(f"Bot starting with App ID: {app_id[:10]}..." if app_id else "No App ID")
+
+SETTINGS = BotFrameworkAdapterSettings(app_id, app_password)
+ADAPTER = BotFrameworkAdapter(SETTINGS)
 
 app = Flask(__name__)
 
-# Flask log тохиргоо
-logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
+# Энгийн health check endpoint
+@app.route("/", methods=["GET"])
+def health_check():
+    return jsonify({
+        "status": "running",
+        "message": "Flask Bot Server is running",
+        "endpoints": ["/api/messages"],
+        "app_id_configured": bool(os.getenv("MICROSOFT_APP_ID")),
+        "openai_configured": bool(os.getenv("OPENAI_API_KEY"))
+    })
 
-@app.before_request
-def log_request_info():
-    logging.info(f"REQUEST: {request.method} {request.path}")
-    if request.data:
-        try:
-            logging.info(f"Request body: {request.data.decode('utf-8')}")
-        except Exception:
-            pass
-
-# Ботын тохиргоо
-BOT_APP_ID = os.getenv("MICROSOFT_APP_ID")
-BOT_APP_PASSWORD = os.getenv("MICROSOFT_APP_PASSWORD")
-TEAMS_SERVICE_URL = "https://smba.trafficmanager.net/teams/"
-TEAMS_CHANNEL_ID = "msteams"
-
-settings = BotFrameworkAdapterSettings(app_id=BOT_APP_ID, app_password=BOT_APP_PASSWORD)
-adapter = BotFrameworkAdapter(settings)
-
-# 1. Teams-ээс мессеж ирэхэд conversation reference хадгалах endpoint
 @app.route("/api/messages", methods=["POST"])
-def messages():
-    if "application/json" in request.headers["Content-Type"]:
-        body = request.json
-    else:
-        return jsonify({"error": "Invalid content type"}), 400
+def process_messages():
+    try:
+        logger.info("Received message request")
+        
+        # Request body шалгах
+        if not request.is_json:
+            logger.error("Request is not JSON")
+            return jsonify({"error": "Content-Type must be application/json"}), 400
+            
+        body = request.get_json()
+        logger.info(f"Request body: {body}")
+        
+        # Хэрэв body хоосон бол
+        if not body:
+            logger.error("Empty request body")
+            return jsonify({"error": "Request body is required"}), 400
 
-    activity = TurnContext.deserialize_activity(body)
-    reference = TurnContext.get_conversation_reference(activity)
-    # Лог болон файлд хадгална
-    logging.info("==== CONVERSATION REFERENCE ====")
-    logging.info(json.dumps(reference.serialize(), indent=2, ensure_ascii=False))
-    with open("conversation_reference.json", "w", encoding="utf-8") as f:
-        json.dump(reference.serialize(), f, ensure_ascii=False, indent=2)
-    
-    # Activity дэлгэрэнгүй log
-    logging.info(f"Activity type: {getattr(activity, 'type', None)}")
-    logging.info(f"From: {getattr(activity.from_property, 'id', None)} | Text: {getattr(activity, 'text', None)}")
-    logging.info(f"Service URL: {getattr(activity, 'service_url', None)}")
-
-    # ECHO: хэрэглэгчийн мессежийг буцааж илгээх
-    async def echo_callback(context: TurnContext):
+        # Activity объект үүсгэх
         try:
-            await context.send_activity(MessageFactory.text(activity.text))
-            logging.info("ECHO sent successfully.")
+            activity = Activity().deserialize(body)
+            logger.info(f"Activity type: {activity.type}, text: {activity.text}")
         except Exception as e:
-            logging.error(f"ECHO send error: {e}")
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    loop.run_until_complete(
-        adapter.process_activity(activity, activity.service_url, echo_callback)
-    )
-    return "", 200
+            logger.error(f"Failed to deserialize activity: {str(e)}")
+            return jsonify({"error": f"Invalid activity format: {str(e)}"}), 400
 
-# 2. Proactive мессеж илгээх endpoint
-async def send_proactive_message(message_text: str):
-    # Хадгалсан conversation reference-ийг уншина
-    with open("conversation_reference.json", "r", encoding="utf-8") as f:
-        ref_data = json.load(f)
-    conversation_reference = ConversationReference().deserialize(ref_data)
-    async def send_message_callback(context: TurnContext):
-        await context.send_activity(MessageFactory.text(message_text))
-    await adapter.continue_conversation(
-        conversation_reference,
-        send_message_callback,
-        BOT_APP_ID
-    )
+        async def logic(context: TurnContext):
+            try:
+                if activity.type == "message":
+                    user_text = activity.text or "No text provided"
+                    logger.info(f"Processing message: {user_text}")
+                    
+                    # OpenAI API key шалгах
+                    if not openai.api_key:
+                        logger.warning("OpenAI API key not configured")
+                        await context.send_activity("OpenAI API key тохируулаагүй байна.")
+                        return
+                    
+                    try:
+                        # OpenAI API дуудах (шинэ format)
+                        client = openai.OpenAI(api_key=openai.api_key)
+                        response = client.chat.completions.create(
+                            model="gpt-3.5-turbo",
+                            messages=[{"role": "user", "content": user_text}]
+                        )
+                        
+                        ai_response = response.choices[0].message.content
+                        logger.info(f"OpenAI response: {ai_response[:100]}...")
+                        await context.send_activity(ai_response)
+                        
+                    except Exception as e:
+                        logger.error(f"OpenAI API error: {str(e)}")
+                        await context.send_activity(f"OpenAI API алдаа: {str(e)}")
+                        
+                else:
+                    logger.info(f"Non-message activity type: {activity.type}")
+                    
+            except Exception as e:
+                logger.error(f"Error in logic function: {str(e)}")
+                await context.send_activity(f"Серверийн алдаа: {str(e)}")
 
-@app.route("/proactive-message", methods=["POST"])
-def proactive_message():
-    data = request.json
-    message_text = data.get("message", "Сайн байна уу!")
-    try:
+        # Bot adapter ашиглан мессеж боловсруулах
         try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        loop.run_until_complete(send_proactive_message(message_text))
-        return jsonify({"status": "ok"})
+            auth_header = request.headers.get('Authorization', '')
+            logger.info(f"Auth header present: {bool(auth_header)}")
+            
+            # Async function-ийг sync контекстэд ажиллуулах
+            asyncio.run(ADAPTER.process_activity(activity, auth_header, logic))
+            logger.info("Message processed successfully")
+            return jsonify({"status": "success"}), 200
+            
+        except Exception as e:
+            logger.error(f"Adapter processing error: {str(e)}")
+            return jsonify({"error": f"Bot framework error: {str(e)}"}), 500
+            
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"Unexpected error: {str(e)}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+# Error handler
+@app.errorhandler(500)
+def internal_error(error):
+    logger.error(f"500 error: {str(error)}")
+    return jsonify({"error": "Internal server error"}), 500
 
 if __name__ == "__main__":
-    logging.info("Bot is running...")
-    app.run(host="0.0.0.0", port=3978)
+    port = int(os.environ.get("PORT", 8000))
+    logger.info(f"Starting Flask app on port {port}")
+    app.run(host="0.0.0.0", port=port, debug=True)
