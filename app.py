@@ -20,8 +20,9 @@ def messages():
     body = request.get_json()
     activity = Activity().deserialize(body)
     conversation_reference = TurnContext.get_conversation_reference(activity)
+    # dict болгож хадгална!
     with open(CONV_REF_FILE, "w", encoding="utf-8") as f:
-        json.dump(conversation_reference, f, ensure_ascii=False)
+        json.dump(conversation_reference.dict(), f, ensure_ascii=False)
     return jsonify({"status": "ok"})
 
 async def send_proactive_message(conversation_reference, message_text):
