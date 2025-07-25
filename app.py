@@ -1,8 +1,8 @@
 import os
 import logging
 from flask import Flask, request, jsonify
-from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings, TurnContext, ConversationReference
-from botbuilder.schema import Activity, ChannelAccount
+from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings, TurnContext
+from botbuilder.schema import Activity, ChannelAccount, ConversationReference
 import openai
 from dotenv import load_dotenv
 import asyncio
