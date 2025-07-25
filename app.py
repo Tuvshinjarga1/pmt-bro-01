@@ -50,21 +50,26 @@ def messages():
     logging.info(json.dumps(reference.serialize(), indent=2, ensure_ascii=False))
     with open("conversation_reference.json", "w", encoding="utf-8") as f:
         json.dump(reference.serialize(), f, ensure_ascii=False, indent=2)
-
+    
     # Activity дэлгэрэнгүй log
     logging.info(f"Activity type: {getattr(activity, 'type', None)}")
     logging.info(f"From: {getattr(activity.from_property, 'id', None)} | Text: {getattr(activity, 'text', None)}")
+    logging.info(f"Service URL: {getattr(activity, 'service_url', None)}")
 
     # ECHO: хэрэглэгчийн мессежийг буцааж илгээх
     async def echo_callback(context: TurnContext):
-        await context.send_activity(MessageFactory.text(activity.text))
+        try:
+            await context.send_activity(MessageFactory.text(activity.text))
+            logging.info("ECHO sent successfully.")
+        except Exception as e:
+            logging.error(f"ECHO send error: {e}")
     try:
         loop = asyncio.get_event_loop()
     except RuntimeError:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
     loop.run_until_complete(
-        adapter.process_activity(activity, "", echo_callback)
+        adapter.process_activity(activity, activity.service_url, echo_callback)
     )
     return "", 200
 
@@ -99,3 +104,4 @@ def proactive_message():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=3978)
+    logging.info("Bot is running...")
