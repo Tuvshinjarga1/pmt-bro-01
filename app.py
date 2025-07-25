@@ -94,9 +94,21 @@ def proactive_message():
             ref_data = json.load(f)
         conversation_reference = ConversationReference().deserialize(ref_data)
 
+        # Дэлгэрэнгүй log
+        logger.info("=== Proactive message info ===")
+        logger.info(f"User ID: {conversation_reference.user.id}")
+        logger.info(f"User Name: {getattr(conversation_reference.user, 'name', None)}")
+        logger.info(f"Conversation ID: {conversation_reference.conversation.id}")
+        logger.info(f"Conversation Type: {getattr(conversation_reference.conversation, 'conversation_type', None)}")
+        logger.info(f"Service URL: {conversation_reference.service_url}")
+        logger.info(f"Bot ID: {conversation_reference.bot.id}")
+        logger.info(f"Tenant ID: {getattr(conversation_reference.conversation, 'tenant_id', None)}")
+        logger.info(f"Channel ID: {conversation_reference.channel_id}")
+        logger.info(f"Message to send: {message_text}")
+
         async def send_proactive(context: TurnContext):
             await context.send_activity(message_text)
-
+        
         asyncio.run(
             ADAPTER.continue_conversation(
                 conversation_reference,
