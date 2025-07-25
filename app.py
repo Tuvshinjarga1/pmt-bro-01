@@ -3,6 +3,7 @@ from flask import Flask, request, jsonify
 from azure.identity.aio import ClientSecretCredential
 import requests
 import asyncio
+import json
 
 TENANT_ID = os.getenv("TENANT_ID")
 CLIENT_ID = os.getenv("CLIENT_ID")
@@ -42,8 +43,8 @@ async def send_snu_message(user_email):
             # Дэлгэрэнгүй алдааны мэдээлэл харуулах
             try:
                 error_detail = chat_response.json()
-                return f"Чат үүсгэхэд алдаа: {chat_response.status_code} - {error_detail}"
-            except:
+                return f"Чат үүсгэхэд алдаа: {chat_response.status_code} - {json.dumps(error_detail, ensure_ascii=False)}"
+            except Exception:
                 return f"Чат үүсгэхэд алдаа: {chat_response.status_code} - {chat_response.text}"
         message_url = f"https://graph.microsoft.com/v1.0/chats/{chat_id}/messages"
         message_data = {
