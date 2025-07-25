@@ -4,10 +4,15 @@ from azure.identity.aio import ClientSecretCredential
 import requests
 import asyncio
 import json
+from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings, TurnContext
+from botbuilder.schema import Activity, ConversationReference
 
 TENANT_ID = os.getenv("TENANT_ID")
 CLIENT_ID = os.getenv("CLIENT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
+
+MICROSOFT_APP_ID = os.getenv("MICROSOFT_APP_ID")
+MICROSOFT_APP_PASSWORD = os.getenv("MICROSOFT_APP_PASSWORD")
 
 app = Flask(__name__)
 
@@ -65,6 +70,15 @@ async def send_snu_message(user_email):
                 return f"Мессеж илгээхэд алдаа: {message_response.status_code} - {message_response.text}"
     finally:
         await credential.close()
+
+SETTINGS = BotFrameworkAdapterSettings(MICROSOFT_APP_ID, MICROSOFT_APP_PASSWORD)
+ADAPTER = BotFrameworkAdapter(SETTINGS)
+
+# Proactive message илгээх функц
+async def send_proactive_message(conversation_reference, message_text):
+    async def aux_func(turn_context: TurnContext):
+        await turn_context.send_activity(message_text)
+    await ADAPTER.continue_conversation(conversation_reference, aux_func, MICROSOFT_APP_ID)
 
 @app.route("/send_snu", methods=["POST"])
 def send_snu():
