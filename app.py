@@ -1,8 +1,8 @@
 import os
 import logging
 from flask import Flask, request, jsonify
-from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings, TurnContext
-from botbuilder.schema import Activity
+from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings, TurnContext, MessageFactory
+from botbuilder.schema import Activity, Attachment
 import asyncio
 import json
 from botbuilder.schema import ConversationReference
@@ -232,14 +232,13 @@ async def handle_leave_request_message(context: TurnContext, text, user_id, user
         
         if approver_conversation:
             async def send_approval_card(ctx: TurnContext):
-                await ctx.send_activity({
-                    "type": "message",
-                    "text": f"📩 Шинэ чөлөөний хүсэлт: {request_data['requester_name']}\n💬 Анхны мессеж: \"{text}\"",
-                    "attachments": [{
-                        "contentType": "application/vnd.microsoft.card.adaptive",
-                        "content": approval_card
-                    }]
-                })
+                adaptive_card_attachment = Attachment(
+                    content_type="application/vnd.microsoft.card.adaptive",
+                    content=approval_card
+                )
+                message = MessageFactory.attachment(adaptive_card_attachment)
+                message.text = f"📩 Шинэ чөлөөний хүсэлт: {request_data['requester_name']}\n💬 Анхны мессеж: \"{text}\""
+                await ctx.send_activity(message)
             
             await ADAPTER.continue_conversation(
                 approver_conversation,
@@ -260,36 +259,24 @@ async def handle_leave_request_message(context: TurnContext, text, user_id, user
 
 async def forward_message_to_admin(text, user_name, user_id):
     """Ердийн мессежийг админд adaptive card-тай дамжуулах"""
-    try:
-        logger.info(f"DEBUG: Starting forward_message_to_admin for user {user_id}")
-        
+    try:        
         approver_conversation = load_conversation_reference(APPROVER_USER_ID)
-        logger.info(f"DEBUG: Loaded approver conversation: {approver_conversation is not None}")
         
         if approver_conversation:
             # Энгийн мессежээс чөлөөний хүсэлт үүсгэх
-            logger.info(f"DEBUG: Parsing leave request from text: {text}")
             parsed_data = parse_leave_request(text, user_name)
-            logger.info(f"DEBUG: Parsed data: {parsed_data}")
-            
             request_id = str(uuid.uuid4())
-            logger.info(f"DEBUG: Generated request ID: {request_id}")
             
             # Хүсэлт гаргагчийн мэдээлэл олох
-            logger.info(f"DEBUG: Looking up user info for user_id: {user_id}")
             requester_info = None
             all_users = list_all_users()
-            logger.info(f"DEBUG: Found {len(all_users)} users total")
             
             for user in all_users:
-                logger.info(f"DEBUG: Checking user: {user.get('user_id')} vs {user_id}")
                 if user["user_id"] == user_id:
                     requester_info = user
-                    logger.info(f"DEBUG: Found requester info: {requester_info}")
                     break
             
             # Хүсэлтийн мэдээлэл бэлтгэх
-            logger.info(f"DEBUG: Creating request data")
             request_data = {
                 "request_id": request_id,
                 "requester_email": requester_info.get("email") if requester_info else "unknown@fibo.cloud",
@@ -305,37 +292,27 @@ async def forward_message_to_admin(text, user_name, user_id):
                 "approver_email": APPROVER_EMAIL,
                 "approver_user_id": APPROVER_USER_ID
             }
-            logger.info(f"DEBUG: Request data created successfully")
             
             # Хүсэлт хадгалах
-            logger.info(f"DEBUG: Saving leave request")
             save_leave_request(request_data)
-            logger.info(f"DEBUG: Leave request saved successfully")
             
             # Adaptive card үүсгэх
-            logger.info(f"DEBUG: Creating approval card")
             approval_card = create_approval_card(request_data)
-            logger.info(f"DEBUG: Approval card created successfully")
             
             async def notify_admin_with_card(ctx: TurnContext):
-                logger.info(f"DEBUG: Sending adaptive card to admin")
-                await ctx.send_activity({
-                    "type": "message",
-                    "text": f"📨 Шинэ мессеж: {user_name}\n💬 Анхны мессеж: \"{text}\"",
-                    "attachments": [{
-                        "contentType": "application/vnd.microsoft.card.adaptive",
-                        "content": approval_card
-                    }]
-                })
-                logger.info(f"DEBUG: Adaptive card sent successfully")
+                adaptive_card_attachment = Attachment(
+                    content_type="application/vnd.microsoft.card.adaptive",
+                    content=approval_card
+                )
+                message = MessageFactory.attachment(adaptive_card_attachment)
+                message.text = f"📨 Шинэ мессеж: {user_name}\n💬 Анхны мессеж: \"{text}\""
+                await ctx.send_activity(message)
             
-            logger.info(f"DEBUG: Starting continue_conversation")
             await ADAPTER.continue_conversation(
                 approver_conversation,
                 notify_admin_with_card,
                 app_id
             )
-            logger.info(f"DEBUG: continue_conversation completed")
             logger.info(f"Message with adaptive card forwarded to admin from {user_id}")
         else:
             logger.warning(f"Approver conversation reference not found. Approver needs to message the bot first.")
@@ -582,14 +559,13 @@ def submit_leave_request():
             return jsonify({"error": "Approver conversation reference not found"}), 404
 
         async def send_approval_card(context: TurnContext):
-            await context.send_activity({
-                "type": "message",
-                "text": f"Шинэ чөлөөний хүсэлт: {requester_info.get('user_name', requester_email)}",
-                "attachments": [{
-                    "contentType": "application/vnd.microsoft.card.adaptive",
-                    "content": approval_card
-                }]
-            })
+            adaptive_card_attachment = Attachment(
+                content_type="application/vnd.microsoft.card.adaptive",
+                content=approval_card
+            )
+            message = MessageFactory.attachment(adaptive_card_attachment)
+            message.text = f"📩 Шинэ чөлөөний хүсэлт: {request_data['requester_name']}\n💬 Анхны мессеж: \"{text}\""
+            await context.send_activity(message)
 
         asyncio.run(
             ADAPTER.continue_conversation(
