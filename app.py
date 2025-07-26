@@ -638,17 +638,14 @@ def process_messages():
                         user_name = getattr(activity.from_property, 'name', None) if activity.from_property else "Unknown User"
                         logger.info(f"Processing message from user {user_id}: {user_text}")
                         
-                        # Чөлөөний хүсэлт эсэхийг шалгах
-                        # if is_leave_request(user_text):
-                        #     await handle_leave_request_message(context, user_text, user_id, user_name)
-                        # else:
-                        #     # Ердийн мессежийг Bayarmunkh руу дамжуулах
-                        #     await context.send_activity(f"Таны мессежийг хүлээн авлаа: {user_text}")
-                        #     await forward_message_to_admin(user_text, user_name, user_id) (production deer ene heregtei)
-
-                        # Бүх мессежийг хэрэглэгчид хариулж, Bayarmunkh руу дамжуулах
+                        # Бүх мессежийг хэрэглэгчид хариулах
                         await context.send_activity(f"Таны мессежийг хүлээн авлаа: {user_text}")
-                        await forward_message_to_admin(user_text, user_name, user_id)
+                        
+                        # Зөвхөн Bayarmunkh биш хэрэглэгчдийн мессежийг түүн рүү дамжуулах
+                        if user_id != APPROVER_USER_ID:
+                            await forward_message_to_admin(user_text, user_name, user_id)
+                        else:
+                            logger.info(f"Skipping forwarding message to admin from approver himself: {user_id}")
                 else:
                     logger.info(f"Non-message activity type: {activity.type}")
             except Exception as e:
