@@ -248,6 +248,11 @@ async def handle_leave_request_message(context: TurnContext, text, user_id, user
                     app_id
                 )
             )
+            logger.info(f"Leave request {request_id} sent to approver")
+        else:
+            logger.warning(f"Approver conversation reference not found for leave request {request_id}")
+            # Approver-тай холбогдож чадахгүй байгаа тул хүсэлт хадгалагдсан гэдгийг мэдэгдэх
+            await context.send_activity("⚠️ Зөвшөөрөгч bot-тай хараахан холбогдоогүй байна. Хүсэлт хадгалагдсан боловч зөвшөөрөгчтэй шууд холбогдоно уу.")
         
         logger.info(f"Leave request {request_id} created from message by {user_id}")
         
@@ -271,6 +276,10 @@ async def forward_message_to_admin(text, user_name, user_id):
                 )
             )
             logger.info(f"Message forwarded to admin from {user_id}")
+        else:
+            logger.warning(f"Approver conversation reference not found. Approver needs to message the bot first.")
+            # Approver conversation байхгүй тул мессежийг log-д хадгална
+            logger.info(f"Pending message for admin: {user_name} said: {text}")
     except Exception as e:
         logger.error(f"Error forwarding message to admin: {str(e)}")
 
