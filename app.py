@@ -241,12 +241,10 @@ async def handle_leave_request_message(context: TurnContext, text, user_id, user
                     }]
                 })
             
-            asyncio.run(
-                ADAPTER.continue_conversation(
-                    approver_conversation,
-                    send_approval_card,
-                    app_id
-                )
+            await ADAPTER.continue_conversation(
+                approver_conversation,
+                send_approval_card,
+                app_id
             )
             logger.info(f"Leave request {request_id} sent to approver")
         else:
@@ -268,12 +266,10 @@ async def forward_message_to_admin(text, user_name, user_id):
             async def notify_admin(ctx: TurnContext):
                 await ctx.send_activity(f"📨 Шинэ мессеж:\n👤 {user_name}\n💬 {text}")
             
-            asyncio.run(
-                ADAPTER.continue_conversation(
-                    approver_conversation,
-                    notify_admin,
-                    app_id
-                )
+            await ADAPTER.continue_conversation(
+                approver_conversation,
+                notify_admin,
+                app_id
             )
             logger.info(f"Message forwarded to admin from {user_id}")
         else:
@@ -662,12 +658,10 @@ async def handle_adaptive_card_action(context: TurnContext, action_data):
                 async def notify_approval(ctx: TurnContext):
                     await ctx.send_activity(f"🎉 Таны чөлөөний хүсэлт зөвшөөрөгдлөө!\n📅 {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног)\n✨ Сайхан амралтаа!")
 
-                asyncio.run(
-                    ADAPTER.continue_conversation(
-                        requester_conversation,
-                        notify_approval,
-                        app_id
-                    )
+                await ADAPTER.continue_conversation(
+                    requester_conversation,
+                    notify_approval,
+                    app_id
                 )
             
         elif action == "reject":
@@ -687,12 +681,10 @@ async def handle_adaptive_card_action(context: TurnContext, action_data):
                 async def notify_rejection(ctx: TurnContext):
                     await ctx.send_activity(f"❌ Таны чөлөөний хүсэлт татгалзагдлаа\n📅 {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног)\n💬 Нэмэлт мэдээллийн хэрэгтэй бол удирдлагатайгаа ярилцана уу.")
 
-                asyncio.run(
-                    ADAPTER.continue_conversation(
-                        requester_conversation,
-                        notify_rejection,
-                        app_id
-                    )
+                await ADAPTER.continue_conversation(
+                    requester_conversation,
+                    notify_rejection,
+                    app_id
                 )
 
         logger.info(f"Leave request {request_id} {action}d by {context.activity.from_property.id}")
