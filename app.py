@@ -22,14 +22,76 @@ ADAPTER = BotFrameworkAdapter(SETTINGS)
 
 app = Flask(__name__)
 
+# Хэрэглэгчийн conversation reference хадгалах directory үүсгэх
+CONVERSATION_DIR = "conversations"
+if not os.path.exists(CONVERSATION_DIR):
+    os.makedirs(CONVERSATION_DIR)
+
+def save_conversation_reference(activity):
+    """Хэрэглэгчийн conversation reference-г хадгалах функц"""
+    try:
+        reference = TurnContext.get_conversation_reference(activity)
+        user_id = activity.from_property.id if activity.from_property else "unknown"
+        conversation_id = activity.conversation.id if activity.conversation else "unknown"
+        
+        # Хэрэглэгчийн ID-ээр файлын нэр үүсгэх (special characters-ээс зайлсхийх)
+        safe_user_id = user_id.replace(":", "_").replace("/", "_").replace("\\", "_")
+        filename = f"{CONVERSATION_DIR}/user_{safe_user_id}.json"
+        
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(reference.serialize(), f, ensure_ascii=False, indent=2)
+        
+        logger.info(f"Saved conversation reference for user {user_id} to {filename}")
+        return filename
+    except Exception as e:
+        logger.error(f"Failed to save conversation reference: {str(e)}")
+        return None
+
+def load_conversation_reference(user_id):
+    """Хэрэглэгчийн conversation reference-г унших функц"""
+    try:
+        safe_user_id = user_id.replace(":", "_").replace("/", "_").replace("\\", "_")
+        filename = f"{CONVERSATION_DIR}/user_{safe_user_id}.json"
+        
+        if not os.path.exists(filename):
+            logger.error(f"Conversation file not found for user {user_id}")
+            return None
+        
+        with open(filename, "r", encoding="utf-8") as f:
+            ref_data = json.load(f)
+        return ConversationReference().deserialize(ref_data)
+    except Exception as e:
+        logger.error(f"Failed to load conversation reference for user {user_id}: {str(e)}")
+        return None
+
+def list_all_users():
+    """Хадгалагдсан бүх хэрэглэгчийн жагсаалт гаргах"""
+    try:
+        users = []
+        for filename in os.listdir(CONVERSATION_DIR):
+            if filename.startswith("user_") and filename.endswith(".json"):
+                user_id = filename[5:-5].replace("_", ":")  # user_ prefix болон .json suffix арилгах
+                users.append(user_id)
+        return users
+    except Exception as e:
+        logger.error(f"Failed to list users: {str(e)}")
+        return []
+
 @app.route("/", methods=["GET"])
 def health_check():
     return jsonify({
         "status": "running",
         "message": "Flask Bot Server is running",
-        "endpoints": ["/api/messages"],
-        "app_id_configured": bool(os.getenv("MICROSOFT_APP_ID"))
+        "endpoints": ["/api/messages", "/proactive-message", "/users"],
+        "app_id_configured": bool(os.getenv("MICROSOFT_APP_ID")),
+        "stored_users": len(list_all_users())
     })
+
+@app.route("/users", methods=["GET"])
+def get_users():
+    """Хадгалагдсан хэрэглэгчдийн жагсаалт"""
+    users = list_all_users()
+    return jsonify({"users": users, "count": len(users)})
 
 @app.route("/api/messages", methods=["POST"])
 def process_messages():
@@ -53,16 +115,15 @@ def process_messages():
             logger.error(f"Failed to deserialize activity: {str(e)}")
             return jsonify({"error": f"Invalid activity format: {str(e)}"}), 400
 
-        # Conversation reference хадгалах
-        reference = TurnContext.get_conversation_reference(activity)
-        with open("conversation_reference.json", "w", encoding="utf-8") as f:
-            json.dump(reference.serialize(), f, ensure_ascii=False, indent=2)
+        # Хэрэглэгчийн conversation reference хадгалах
+        save_conversation_reference(activity)
 
         async def logic(context: TurnContext):
             try:
                 if activity.type == "message":
                     user_text = activity.text or "No text provided"
-                    logger.info(f"Processing message: {user_text}")
+                    user_id = activity.from_property.id if activity.from_property else "unknown"
+                    logger.info(f"Processing message from user {user_id}: {user_text}")
                     await context.send_activity(f"Таны мессежийг хүлээн авлаа: {user_text}")
                 else:
                     logger.info(f"Non-message activity type: {activity.type}")
@@ -88,12 +149,23 @@ def process_messages():
 def proactive_message():
     data = request.json
     message_text = data.get("message", "Сайн байна уу!")
+    user_id = data.get("user_id")  # Тодорхой хэрэглэгч рүү мессеж илгээх
+    
     try:
-        # Хадгалсан conversation reference-г унших
-        with open("conversation_reference.json", "r", encoding="utf-8") as f:
-            ref_data = json.load(f)
-        conversation_reference = ConversationReference().deserialize(ref_data)
-
+        if user_id:
+            # Тодорхой хэрэглэгч рүү мессеж илгээх
+            conversation_reference = load_conversation_reference(user_id)
+            if not conversation_reference:
+                return jsonify({"error": f"User {user_id} not found"}), 404
+        else:
+            # Хуучин арга: conversation_reference.json файлаас унших
+            try:
+                with open("conversation_reference.json", "r", encoding="utf-8") as f:
+                    ref_data = json.load(f)
+                conversation_reference = ConversationReference().deserialize(ref_data)
+            except FileNotFoundError:
+                return jsonify({"error": "No conversation reference found. Please specify user_id or ensure at least one user has messaged the bot."}), 404
+        
         # Дэлгэрэнгүй log
         logger.info("=== Proactive message info ===")
         logger.info(f"User ID: {conversation_reference.user.id}")
@@ -105,7 +177,7 @@ def proactive_message():
         logger.info(f"Tenant ID: {getattr(conversation_reference.conversation, 'tenant_id', None)}")
         logger.info(f"Channel ID: {conversation_reference.channel_id}")
         logger.info(f"Message to send: {message_text}")
-
+        
         async def send_proactive(context: TurnContext):
             await context.send_activity(message_text)
         
@@ -117,10 +189,45 @@ def proactive_message():
             )
         )
         logger.info("Proactive message sent successfully")
-        return jsonify({"status": "ok"}), 200
+        return jsonify({"status": "ok", "user_id": conversation_reference.user.id}), 200
     except Exception as e:
         logger.error(f"Proactive message error: {str(e)}")
         return jsonify({"error": str(e)}), 500
+
+@app.route("/broadcast", methods=["POST"])
+def broadcast_message():
+    """Бүх хэрэглэгч рүү мессеж илгээх"""
+    data = request.json
+    message_text = data.get("message", "Сайн байна уу!")
+    
+    users = list_all_users()
+    if not users:
+        return jsonify({"error": "No users found"}), 404
+    
+    results = []
+    for user_id in users:
+        try:
+            conversation_reference = load_conversation_reference(user_id)
+            if conversation_reference:
+                async def send_proactive(context: TurnContext):
+                    await context.send_activity(message_text)
+                
+                asyncio.run(
+                    ADAPTER.continue_conversation(
+                        conversation_reference,
+                        send_proactive,
+                        app_id
+                    )
+                )
+                results.append({"user_id": user_id, "status": "success"})
+                logger.info(f"Message sent to user {user_id}")
+            else:
+                results.append({"user_id": user_id, "status": "failed", "error": "Reference not found"})
+        except Exception as e:
+            results.append({"user_id": user_id, "status": "failed", "error": str(e)})
+            logger.error(f"Failed to send message to user {user_id}: {str(e)}")
+    
+    return jsonify({"results": results, "total_users": len(users), "message": message_text}), 200
 
 @app.errorhandler(500)
 def internal_error(error):
