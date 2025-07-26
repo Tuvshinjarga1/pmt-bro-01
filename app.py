@@ -261,20 +261,35 @@ async def handle_leave_request_message(context: TurnContext, text, user_id, user
 async def forward_message_to_admin(text, user_name, user_id):
     """Ердийн мессежийг админд adaptive card-тай дамжуулах"""
     try:
+        logger.info(f"DEBUG: Starting forward_message_to_admin for user {user_id}")
+        
         approver_conversation = load_conversation_reference(APPROVER_USER_ID)
+        logger.info(f"DEBUG: Loaded approver conversation: {approver_conversation is not None}")
+        
         if approver_conversation:
             # Энгийн мессежээс чөлөөний хүсэлт үүсгэх
+            logger.info(f"DEBUG: Parsing leave request from text: {text}")
             parsed_data = parse_leave_request(text, user_name)
+            logger.info(f"DEBUG: Parsed data: {parsed_data}")
+            
             request_id = str(uuid.uuid4())
+            logger.info(f"DEBUG: Generated request ID: {request_id}")
             
             # Хүсэлт гаргагчийн мэдээлэл олох
+            logger.info(f"DEBUG: Looking up user info for user_id: {user_id}")
             requester_info = None
-            for user in list_all_users():
+            all_users = list_all_users()
+            logger.info(f"DEBUG: Found {len(all_users)} users total")
+            
+            for user in all_users:
+                logger.info(f"DEBUG: Checking user: {user.get('user_id')} vs {user_id}")
                 if user["user_id"] == user_id:
                     requester_info = user
+                    logger.info(f"DEBUG: Found requester info: {requester_info}")
                     break
             
             # Хүсэлтийн мэдээлэл бэлтгэх
+            logger.info(f"DEBUG: Creating request data")
             request_data = {
                 "request_id": request_id,
                 "requester_email": requester_info.get("email") if requester_info else "unknown@fibo.cloud",
@@ -290,14 +305,20 @@ async def forward_message_to_admin(text, user_name, user_id):
                 "approver_email": APPROVER_EMAIL,
                 "approver_user_id": APPROVER_USER_ID
             }
+            logger.info(f"DEBUG: Request data created successfully")
             
             # Хүсэлт хадгалах
+            logger.info(f"DEBUG: Saving leave request")
             save_leave_request(request_data)
+            logger.info(f"DEBUG: Leave request saved successfully")
             
             # Adaptive card үүсгэх
+            logger.info(f"DEBUG: Creating approval card")
             approval_card = create_approval_card(request_data)
+            logger.info(f"DEBUG: Approval card created successfully")
             
             async def notify_admin_with_card(ctx: TurnContext):
+                logger.info(f"DEBUG: Sending adaptive card to admin")
                 await ctx.send_activity({
                     "type": "message",
                     "text": f"📨 Шинэ мессеж: {user_name}\n💬 Анхны мессеж: \"{text}\"",
@@ -306,12 +327,15 @@ async def forward_message_to_admin(text, user_name, user_id):
                         "content": approval_card
                     }]
                 })
+                logger.info(f"DEBUG: Adaptive card sent successfully")
             
+            logger.info(f"DEBUG: Starting continue_conversation")
             await ADAPTER.continue_conversation(
                 approver_conversation,
                 notify_admin_with_card,
                 app_id
             )
+            logger.info(f"DEBUG: continue_conversation completed")
             logger.info(f"Message with adaptive card forwarded to admin from {user_id}")
         else:
             logger.warning(f"Approver conversation reference not found. Approver needs to message the bot first.")
@@ -319,6 +343,8 @@ async def forward_message_to_admin(text, user_name, user_id):
             logger.info(f"Pending message for admin: {user_name} said: {text}")
     except Exception as e:
         logger.error(f"Error forwarding message to admin: {str(e)}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
 
 def save_conversation_reference(activity):
     """Хэрэглэгчийн conversation reference болон нэмэлт мэдээллийг хадгалах функц"""
