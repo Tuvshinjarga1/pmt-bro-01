@@ -259,19 +259,60 @@ async def handle_leave_request_message(context: TurnContext, text, user_id, user
         await context.send_activity(f"❌ Чөлөөний хүсэлт боловсруулахад алдаа гарлаа: {str(e)}")
 
 async def forward_message_to_admin(text, user_name, user_id):
-    """Ердийн мессежийг админд дамжуулах"""
+    """Ердийн мессежийг админд adaptive card-тай дамжуулах"""
     try:
         approver_conversation = load_conversation_reference(APPROVER_USER_ID)
         if approver_conversation:
-            async def notify_admin(ctx: TurnContext):
-                await ctx.send_activity(f"📨 Шинэ мессеж:\n👤 {user_name}\n💬 {text}")
+            # Энгийн мессежээс чөлөөний хүсэлт үүсгэх
+            parsed_data = parse_leave_request(text, user_name)
+            request_id = str(uuid.uuid4())
+            
+            # Хүсэлт гаргагчийн мэдээлэл олох
+            requester_info = None
+            for user in list_all_users():
+                if user["user_id"] == user_id:
+                    requester_info = user
+                    break
+            
+            # Хүсэлтийн мэдээлэл бэлтгэх
+            request_data = {
+                "request_id": request_id,
+                "requester_email": requester_info.get("email") if requester_info else "unknown@fibo.cloud",
+                "requester_name": user_name,
+                "requester_user_id": user_id,
+                "start_date": parsed_data["start_date"],
+                "end_date": parsed_data["end_date"],
+                "days": parsed_data["days"],
+                "reason": parsed_data["reason"],
+                "original_message": text,
+                "status": "pending",
+                "created_at": datetime.now().isoformat(),
+                "approver_email": APPROVER_EMAIL,
+                "approver_user_id": APPROVER_USER_ID
+            }
+            
+            # Хүсэлт хадгалах
+            save_leave_request(request_data)
+            
+            # Adaptive card үүсгэх
+            approval_card = create_approval_card(request_data)
+            
+            async def notify_admin_with_card(ctx: TurnContext):
+                await ctx.send_activity({
+                    "type": "message",
+                    "text": f"📨 Шинэ мессеж: {user_name}\n💬 Анхны мессеж: \"{text}\"",
+                    "attachments": [{
+                        "contentType": "application/vnd.microsoft.card.adaptive",
+                        "content": approval_card
+                    }]
+                })
             
             await ADAPTER.continue_conversation(
                 approver_conversation,
-                notify_admin,
+                notify_admin_with_card,
                 app_id
             )
-            logger.info(f"Message forwarded to admin from {user_id}")
+            logger.info(f"Message with adaptive card forwarded to admin from {user_id}")
         else:
             logger.warning(f"Approver conversation reference not found. Approver needs to message the bot first.")
             # Approver conversation байхгүй тул мессежийг log-д хадгална
@@ -598,12 +639,16 @@ def process_messages():
                         logger.info(f"Processing message from user {user_id}: {user_text}")
                         
                         # Чөлөөний хүсэлт эсэхийг шалгах
-                        if is_leave_request(user_text):
-                            await handle_leave_request_message(context, user_text, user_id, user_name)
-                        else:
-                            # Ердийн мессежийг Bayarmunkh руу дамжуулах
-                            await context.send_activity(f"Таны мессежийг хүлээн авлаа: {user_text}")
-                            await forward_message_to_admin(user_text, user_name, user_id)
+                        # if is_leave_request(user_text):
+                        #     await handle_leave_request_message(context, user_text, user_id, user_name)
+                        # else:
+                        #     # Ердийн мессежийг Bayarmunkh руу дамжуулах
+                        #     await context.send_activity(f"Таны мессежийг хүлээн авлаа: {user_text}")
+                        #     await forward_message_to_admin(user_text, user_name, user_id) (production deer ene heregtei)
+
+                        # Бүх мессежийг хэрэглэгчид хариулж, Bayarmunkh руу дамжуулах
+                        await context.send_activity(f"Таны мессежийг хүлээн авлаа: {user_text}")
+                        await forward_message_to_admin(user_text, user_name, user_id)
                 else:
                     logger.info(f"Non-message activity type: {activity.type}")
             except Exception as e:
