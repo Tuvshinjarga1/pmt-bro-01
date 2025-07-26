@@ -7,7 +7,7 @@ import asyncio
 import json
 from botbuilder.schema import ConversationReference
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 import uuid
 
 # Logging тохиргоо
@@ -127,6 +127,152 @@ def load_leave_request(request_id):
     except Exception as e:
         logger.error(f"Failed to load leave request {request_id}: {str(e)}")
         return None
+
+def is_leave_request(text):
+    """Мессеж нь чөлөөний хүсэлт эсэхийг шалгах"""
+    leave_keywords = [
+        'чөлөө', 'амралт', 'leave', 'vacation', 'holiday',
+        'чөлөөний хүсэлт', 'амралтын хүсэлт', 'чөлөө авах',
+        'амрах', 'чөлөөтэй байх', 'амралтанд явах'
+    ]
+    
+    text_lower = text.lower()
+    return any(keyword in text_lower for keyword in leave_keywords)
+
+def parse_leave_request(text, user_name):
+    """Мессежээс чөлөөний хүсэлтийн мэдээлэл гаргах"""
+    
+    # Огноо олох regex patterns
+    date_patterns = [
+        r'(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})',  # 01/02/2024 эсвэл 1-2-24
+        r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})',    # 2024/01/02
+        r'(\d{1,2})\s*(?:сар|сарын)\s*(\d{1,2})', # 2 сарын 15
+    ]
+    
+    # Хоногийн тоо олох
+    days_match = re.search(r'(\d+)\s*(?:хоног|өдөр|day)', text.lower())
+    days = int(days_match.group(1)) if days_match else 1
+    
+    # Огноо олох
+    dates_found = []
+    for pattern in date_patterns:
+        matches = re.findall(pattern, text)
+        dates_found.extend(matches)
+    
+    # Default values
+    today = datetime.now()
+    start_date = today.strftime("%Y-%m-%d")
+    end_date = (today + timedelta(days=days-1)).strftime("%Y-%m-%d")
+    
+    # Шалтгаан гаргах (чөлөө гэсэн үгээс хойших хэсгийг авах)
+    reason_keywords = ['учир', 'шалтгаан', 'because', 'reason', 'for']
+    reason = "Хувийн шаардлага"
+    
+    for keyword in reason_keywords:
+        if keyword in text.lower():
+            parts = text.lower().split(keyword)
+            if len(parts) > 1:
+                reason = parts[1].strip()[:100]  # Эхний 100 тэмдэгт
+                break
+    
+    return {
+        "requester_name": user_name,
+        "start_date": start_date,
+        "end_date": end_date, 
+        "days": days,
+        "reason": reason
+    }
+
+async def handle_leave_request_message(context: TurnContext, text, user_id, user_name):
+    """Чөлөөний хүсэлтийн мессежийг боловсруулах"""
+    try:
+        # Хүсэлт гаргагчийн мэдээлэл олох
+        requester_info = None
+        for user in list_all_users():
+            if user["user_id"] == user_id:
+                requester_info = user
+                break
+        
+        if not requester_info:
+            await context.send_activity("❌ Таны мэдээлэл олдсонгүй. Эхлээд bot-тай чатлана уу.")
+            return
+        
+        # Мессежээс мэдээлэл гаргах
+        parsed_data = parse_leave_request(text, user_name or requester_info.get("user_name", "Unknown"))
+        
+        # Хүсэлтийн ID үүсгэх
+        request_id = str(uuid.uuid4())
+        
+        # Хүсэлтийн мэдээлэл бэлтгэх
+        request_data = {
+            "request_id": request_id,
+            "requester_email": requester_info.get("email"),
+            "requester_name": parsed_data["requester_name"],
+            "requester_user_id": user_id,
+            "start_date": parsed_data["start_date"],
+            "end_date": parsed_data["end_date"],
+            "days": parsed_data["days"],
+            "reason": parsed_data["reason"],
+            "original_message": text,
+            "status": "pending",
+            "created_at": datetime.now().isoformat(),
+            "approver_email": APPROVER_EMAIL,
+            "approver_user_id": APPROVER_USER_ID
+        }
+        
+        # Хүсэлт хадгалах
+        save_leave_request(request_data)
+        
+        # Хүсэлт гаргагчид хариулах
+        await context.send_activity(f"✅ Чөлөөний хүсэлт хүлээн авлаа!\n📅 {parsed_data['start_date']} - {parsed_data['end_date']} ({parsed_data['days']} хоног)\n💭 {parsed_data['reason']}\n⏳ Зөвшөөрөлийн хүлээлгэд байна...")
+        
+        # Bayarmunkh руу adaptive card илгээх
+        approval_card = create_approval_card(request_data)
+        approver_conversation = load_conversation_reference(APPROVER_USER_ID)
+        
+        if approver_conversation:
+            async def send_approval_card(ctx: TurnContext):
+                await ctx.send_activity({
+                    "type": "message",
+                    "text": f"📩 Шинэ чөлөөний хүсэлт: {request_data['requester_name']}\n💬 Анхны мессеж: \"{text}\"",
+                    "attachments": [{
+                        "contentType": "application/vnd.microsoft.card.adaptive",
+                        "content": approval_card
+                    }]
+                })
+            
+            asyncio.run(
+                ADAPTER.continue_conversation(
+                    approver_conversation,
+                    send_approval_card,
+                    app_id
+                )
+            )
+        
+        logger.info(f"Leave request {request_id} created from message by {user_id}")
+        
+    except Exception as e:
+        logger.error(f"Error handling leave request message: {str(e)}")
+        await context.send_activity(f"❌ Чөлөөний хүсэлт боловсруулахад алдаа гарлаа: {str(e)}")
+
+async def forward_message_to_admin(text, user_name, user_id):
+    """Ердийн мессежийг админд дамжуулах"""
+    try:
+        approver_conversation = load_conversation_reference(APPROVER_USER_ID)
+        if approver_conversation:
+            async def notify_admin(ctx: TurnContext):
+                await ctx.send_activity(f"📨 Шинэ мессеж:\n👤 {user_name}\n💬 {text}")
+            
+            asyncio.run(
+                ADAPTER.continue_conversation(
+                    approver_conversation,
+                    notify_admin,
+                    app_id
+                )
+            )
+            logger.info(f"Message forwarded to admin from {user_id}")
+    except Exception as e:
+        logger.error(f"Error forwarding message to admin: {str(e)}")
 
 def save_conversation_reference(activity):
     """Хэрэглэгчийн conversation reference болон нэмэлт мэдээллийг хадгалах функц"""
@@ -443,8 +589,16 @@ def process_messages():
                         # Ердийн мессеж
                         user_text = activity.text or "No text provided"
                         user_id = activity.from_property.id if activity.from_property else "unknown"
+                        user_name = getattr(activity.from_property, 'name', None) if activity.from_property else "Unknown User"
                         logger.info(f"Processing message from user {user_id}: {user_text}")
-                        await context.send_activity(f"Таны мессежийг хүлээн авлаа: {user_text}")
+                        
+                        # Чөлөөний хүсэлт эсэхийг шалгах
+                        if is_leave_request(user_text):
+                            await handle_leave_request_message(context, user_text, user_id, user_name)
+                        else:
+                            # Ердийн мессежийг Bayarmunkh руу дамжуулах
+                            await context.send_activity(f"Таны мессежийг хүлээн авлаа: {user_text}")
+                            await forward_message_to_admin(user_text, user_name, user_id)
                 else:
                     logger.info(f"Non-message activity type: {activity.type}")
             except Exception as e:
