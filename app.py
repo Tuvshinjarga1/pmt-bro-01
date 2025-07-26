@@ -6,6 +6,7 @@ from botbuilder.schema import Activity
 import asyncio
 import json
 from botbuilder.schema import ConversationReference
+import re
 
 # Logging тохиргоо
 logging.basicConfig(level=logging.INFO)
@@ -58,6 +59,16 @@ def save_conversation_reference(activity):
                     user_info["email"] = name.split(" <")[1].rstrip(">")
                 elif "<" in name and ">" in name:
                     user_info["email"] = name.split("<")[1].split(">")[0]
+            else:
+                # Мэйл хаяг байхгүй бол display name-аас үүсгэх
+                # "Tuvshinjargal Enkhtaivan" -> "tuvshinjargal@fibo.cloud"
+                user_info["user_name"] = name
+                if name and name.strip():
+                    # Эхний үгийг авч жижиг үсэг болгох
+                    first_name = name.strip().split()[0].lower()
+                    # Тусгай тэмдэгтүүдийг арилгах
+                    first_name = re.sub(r'[^a-zA-Z0-9]', '', first_name)
+                    user_info["email"] = f"{first_name}@fibo.cloud"
         
         # Additional Azure AD properties шалгах
         if hasattr(activity.from_property, 'aad_object_id'):
