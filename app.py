@@ -144,7 +144,14 @@ def save_conversation_reference(activity):
             "last_activity": activity.timestamp.isoformat() if activity.timestamp else None,
             "channel_id": activity.channel_id,
             "service_url": activity.service_url,
-            "conversation_reference": reference.serialize()
+            "conversation_reference": reference.serialize(),
+            "conversation_details": {
+                "conversation_id": activity.conversation.id if activity.conversation else None,
+                "conversation_type": getattr(activity.conversation, 'conversation_type', None) if activity.conversation else None,
+                "tenant_id": getattr(activity.conversation, 'tenant_id', None) if activity.conversation else None,
+                "is_group": getattr(activity.conversation, 'is_group', None) if activity.conversation else None,
+                "name": getattr(activity.conversation, 'name', None) if activity.conversation else None
+            }
         }
         
         # Мэйл хаяг олох оролдлого (Teams-ээс ихэвчлэн name дотор байдаг)
@@ -241,7 +248,12 @@ def list_all_users():
                             "email": user_info.get("email"),
                             "user_name": user_info.get("user_name"),
                             "last_activity": user_info.get("last_activity"),
-                            "channel_id": user_info.get("channel_id")
+                            "channel_id": user_info.get("channel_id"),
+                            "conversation_id": user_info.get("conversation_id"),
+                            "conversation_type": user_info.get("conversation_details", {}).get("conversation_type"),
+                            "tenant_id": user_info.get("conversation_details", {}).get("tenant_id"),
+                            "is_group": user_info.get("conversation_details", {}).get("is_group"),
+                            "conversation_name": user_info.get("conversation_details", {}).get("name")
                         })
                     else:
                         # Хуучин формат - зөвхөн user_id нэмэх
@@ -250,7 +262,12 @@ def list_all_users():
                             "email": None,
                             "user_name": None,
                             "last_activity": None,
-                            "channel_id": None
+                            "channel_id": None,
+                            "conversation_id": None,
+                            "conversation_type": None,
+                            "tenant_id": None,
+                            "is_group": None,
+                            "conversation_name": None
                         })
                 else:
                     users.append({
@@ -258,19 +275,31 @@ def list_all_users():
                         "email": None,
                         "user_name": None,
                         "last_activity": None,
-                        "channel_id": None
+                        "channel_id": None,
+                        "conversation_id": None,
+                        "conversation_type": None,
+                        "tenant_id": None,
+                        "is_group": None,
+                        "conversation_name": None
                     })
         return users
     except Exception as e:
         logger.error(f"Failed to list users: {str(e)}")
         return []
 
+def find_user_by_conversation_id(conversation_id):
+    """Conversation ID-аар хэрэглэгч олох"""
+    for user in list_all_users():
+        if user.get("conversation_id") == conversation_id:
+            return user
+    return None
+
 @app.route("/", methods=["GET"])
 def health_check():
     return jsonify({
         "status": "running",
         "message": "Flask Bot Server is running",
-        "endpoints": ["/api/messages", "/proactive-message", "/users", "/broadcast", "/leave-request", "/approval-callback"],
+        "endpoints": ["/api/messages", "/proactive-message", "/users", "/broadcast", "/leave-request", "/approval-callback", "/send-by-conversation"],
         "app_id_configured": bool(os.getenv("MICROSOFT_APP_ID")),
         "stored_users": len(list_all_users())
     })
@@ -610,6 +639,52 @@ def broadcast_message():
             logger.error(f"Failed to send message to user {user_id}: {str(e)}")
     
     return jsonify({"results": results, "total_users": len(users), "message": message_text}), 200
+
+@app.route("/send-by-conversation", methods=["POST"])
+def send_by_conversation():
+    """Conversation ID-аар мессеж илгээх"""
+    try:
+        data = request.json
+        conversation_id = data.get("conversation_id")
+        message_text = data.get("message", "Сайн байна уу!")
+
+        if not conversation_id:
+            return jsonify({"error": "conversation_id is required"}), 400
+
+        # Conversation ID-аар хэрэглэгч олох
+        user_info = find_user_by_conversation_id(conversation_id)
+        if not user_info:
+            return jsonify({"error": f"User with conversation_id {conversation_id} not found"}), 404
+
+        # Conversation reference унших
+        conversation_reference = load_conversation_reference(user_info["user_id"])
+        if not conversation_reference:
+            return jsonify({"error": "Conversation reference not found"}), 404
+
+        # Мессеж илгээх
+        async def send_message(context: TurnContext):
+            await context.send_activity(message_text)
+
+        asyncio.run(
+            ADAPTER.continue_conversation(
+                conversation_reference,
+                send_message,
+                app_id
+            )
+        )
+
+        logger.info(f"Message sent to conversation {conversation_id} (user: {user_info.get('email', 'N/A')})")
+        return jsonify({
+            "status": "success",
+            "conversation_id": conversation_id,
+            "user_email": user_info.get("email"),
+            "user_name": user_info.get("user_name"),
+            "message": message_text
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Send by conversation error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 @app.errorhandler(500)
 def internal_error(error):
