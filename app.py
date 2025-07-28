@@ -48,6 +48,21 @@ APPROVER_USER_ID = "29:1kIuFRh3SgMXCUqtZSJBjHDaDmVF7l2-zXmi3qZNRBokdrt8QxiwyVPut
 
 def create_approval_card(request_data):
     """Approval-ын тулд adaptive card үүсгэх"""
+    
+    inactive_hours = request_data.get('inactive_hours', 8)
+    days = request_data.get('days', 1)
+    
+    # Хугацааны мэдээлэл форматлах
+    if inactive_hours < 8:
+        duration_info = f"{inactive_hours} цаг"
+        hours_display = f"{inactive_hours} цаг"
+    elif inactive_hours == 8:
+        duration_info = "1 хоног"
+        hours_display = f"{inactive_hours} цаг (1 хоног)"
+    else:
+        duration_info = f"{days} хоног"
+        hours_display = f"{inactive_hours} цаг ({days} хоног)"
+    
     card = {
         "type": "AdaptiveCard",
         "version": "1.4",
@@ -75,12 +90,12 @@ def create_approval_card(request_data):
                         "value": request_data.get("end_date", "N/A")
                     },
                     {
-                        "title": "Хоногийн тоо:",
-                        "value": str(request_data.get("days", "N/A"))
+                        "title": "Хугацаа:",
+                        "value": duration_info
                     },
                     {
                         "title": "Цагийн тоо:",
-                        "value": f"{request_data.get('inactive_hours', 'N/A')} цаг"
+                        "value": hours_display
                     },
                     {
                         "title": "Шалтгаан:",
@@ -187,7 +202,7 @@ type Absence struct {{
 - start_date: Эхлэх огноо (YYYY-MM-DD формат)
 - reason: Шалтгаан (string)
 - employee_id: Ажилтны ID (засвар хийх шаардлагагүй, backend дээр тохируулна)
-- inactive_hours: Идэвхгүй цагийн тоо (8 цаг = 1 хоног)
+- inactive_hours: Идэвхгүй цагийн тоо (ЦААГААР тооцоолох)
 - status: Төлөв (default: "pending")
 - needs_clarification: Нэмэлт мэдээлэл хэрэгтэй эсэх (true/false)
 - questions: Хэрэв needs_clarification true бол асуух асуултууд
@@ -198,9 +213,18 @@ type Absence struct {{
 - "ХОЁР ӨДРИЙН ДАРАА" = {(today + timedelta(days=2)).strftime("%Y-%m-%d")}
 - "ЭНЭ ДОЛОО ХОНОГ" = одоогийн долоо хоногт
 - "ДАРААГИЙН ДОЛОО ХОНОГ" = дараагийн долоо хоногт
+
+ЦАГИЙН ТООЦООЛОЛ:
+- "1 ХОНОГ" = 8 цаг
+- "0.5 ХОНОГ" эсвэл "ХАГАС ХОНОГ" = 4 цаг
+- "2 ЦАГ" = 2 цаг
+- "3 ЦАГ" = 3 цаг
+- "4 ЦАГ" = 4 цаг
+- "ӨГЛӨӨний ЦАГ" эсвэл "ӨГЛӨӨ" = 4 цаг
+- "ҮДЭЭС ХОЙШ" эсвэл "ҮДИЙН ЦАГ" = 4 цаг
+
 - Хэрэв огноо тодорхойгүй бол тодорхой болж асуух
-- Хэрэв хоногийн тоо байхгүй бол 1 хоног (8 цаг) гэж үзэх
-- InActiveHours = хоногийн тоо × 8 (8 цагийн ажлын өдөр)
+- Хэрэв цаг/хоног тодорхойгүй бол 8 цаг (1 хоног) гэж үзэх
 - Хэрэв шалтгаан байхгүй бол "Хувийн шаардлага" гэж үзэх
 - Status үргэлж "pending" байна
 - Хэрэв мэдээлэл дутуу бол needs_clarification = true болгож асуултууд нэмэх
@@ -273,12 +297,35 @@ def parse_leave_request_simple(text, user_name):
     # Өнөөдрийн огноо олох
     today = datetime.now()
     
-    # Хоногийн тоо олох
-    days_match = re.search(r'(\d+)\s*(?:хоног|өдөр|day)', text.lower())
-    days = int(days_match.group(1)) if days_match else 1
+    # Цаг ба хоногийн тоо олох
+    text_lower = text.lower()
+    
+    # Цагийн тоо шалгах
+    hours_match = re.search(r'(\d+)\s*(?:цаг|час|hour)', text_lower)
+    
+    # Хоногийн тоо шалгах
+    days_match = re.search(r'(\d+)\s*(?:хоног|өдөр|day)', text_lower)
+    
+    # Хагас хоног шалгах
+    half_day_patterns = ['хагас хоног', '0.5 хоног', 'хагас өдөр', 'өглөө', 'үдээс хойш', 'үдийн цаг']
+    is_half_day = any(pattern in text_lower for pattern in half_day_patterns)
+    
+    # Цагийн тоо тодорхойлох
+    if hours_match:
+        inactive_hours = int(hours_match.group(1))
+        days = max(1, inactive_hours // 8)  # Хамгийн багадаа 1 өдөр
+    elif is_half_day:
+        inactive_hours = 4
+        days = 1
+    elif days_match:
+        days = int(days_match.group(1))
+        inactive_hours = days * 8
+    else:
+        # Default - 1 хоног
+        days = 1
+        inactive_hours = 8
     
     # Start date тодорхойлох
-    text_lower = text.lower()
     if 'маргааш' in text_lower:
         start_date = (today + timedelta(days=1)).strftime("%Y-%m-%d")
     elif 'өнөөдөр' in text_lower:
@@ -293,7 +340,12 @@ def parse_leave_request_simple(text, user_name):
     
     # End date тооцоолох
     start_date_obj = datetime.strptime(start_date, "%Y-%m-%d")
-    end_date = (start_date_obj + timedelta(days=days-1)).strftime("%Y-%m-%d")
+    if inactive_hours < 8:
+        # Цагийн чөлөө бол тэр өдөр л
+        end_date = start_date
+    else:
+        # Хоногийн чөлөө
+        end_date = (start_date_obj + timedelta(days=days-1)).strftime("%Y-%m-%d")
     
     # Шалтгаан гаргах
     reason_keywords = ['учир', 'шалтгаан', 'because', 'reason', 'for']
@@ -312,7 +364,7 @@ def parse_leave_request_simple(text, user_name):
         "end_date": end_date, 
         "days": days,
         "reason": reason,
-        "inactive_hours": days * 8,  # 8 цагийн ажлын өдөр
+        "inactive_hours": inactive_hours,
         "status": "pending",
         "needs_clarification": False,
         "questions": []
@@ -935,6 +987,69 @@ async def handle_adaptive_card_action(context: TurnContext, action_data):
             await context.send_activity("❌ Хүсэлт олдсонгүй")
             return
 
+        # Анхны card-ийг статус card-аар солих
+        def create_status_card(status, action_type):
+            """Төлөвийн card үүсгэх"""
+            if action_type == "approve":
+                color = "good"
+                title = "✅ Зөвшөөрөгдсөн"
+                status_text = "Энэ чөлөөний хүсэлт зөвшөөрөгдлөө"
+            else:
+                color = "attention"
+                title = "❌ Татгалзагдсан"
+                status_text = "Энэ чөлөөний хүсэлт татгалзагдлаа"
+            
+            inactive_hours = request_data.get('inactive_hours', 8)
+            days = request_data.get('days', 1)
+            
+            # Хугацааны мэдээлэл форматлах
+            if inactive_hours < 8:
+                duration_info = f"{inactive_hours} цаг"
+            elif inactive_hours == 8:
+                duration_info = "1 хоног"
+            else:
+                duration_info = f"{days} хоног"
+            
+            return {
+                "type": "AdaptiveCard",
+                "version": "1.4",
+                "body": [
+                    {
+                        "type": "TextBlock",
+                        "text": title,
+                        "weight": "bolder",
+                        "size": "large",
+                        "color": color
+                    },
+                    {
+                        "type": "TextBlock",
+                        "text": status_text,
+                        "wrap": True
+                    },
+                    {
+                        "type": "FactSet",
+                        "facts": [
+                            {
+                                "title": "Хүсэлт гаргагч:",
+                                "value": request_data.get("requester_name", "N/A")
+                            },
+                            {
+                                "title": "Хугацаа:",
+                                "value": f"{request_data.get('start_date')} - {request_data.get('end_date')} ({duration_info})"
+                            },
+                            {
+                                "title": "Шалтгаан:",
+                                "value": request_data.get("reason", "Тодорхойгүй")
+                            },
+                            {
+                                "title": "Боловсруулсан:",
+                                "value": datetime.now().strftime("%Y-%m-%d %H:%M")
+                            }
+                        ]
+                    }
+                ]
+            }
+
         # Approval status шинэчлэх
         if action == "approve":
             request_data["status"] = "approved"
@@ -944,14 +1059,20 @@ async def handle_adaptive_card_action(context: TurnContext, action_data):
             # Хүсэлт хадгалах
             save_leave_request(request_data)
             
-            # Approver руу баталгаажуулах
-            await context.send_activity(f"✅ Чөлөөний хүсэлт зөвшөөрөгдлөө!\n👤 {request_data['requester_name']}\n📅 {request_data['start_date']} - {request_data['end_date']}")
+            # Статус card үүсгэх ба илгээх
+            status_card = create_status_card("approved", "approve")
+            adaptive_card_attachment = Attachment(
+                content_type="application/vnd.microsoft.card.adaptive",
+                content=status_card
+            )
+            status_message = MessageFactory.attachment(adaptive_card_attachment)
+            await context.send_activity(status_message)
             
             # Хүсэлт гаргагч руу мэдэгдэх
             requester_conversation = load_conversation_reference(request_data["requester_user_id"])
             if requester_conversation:
                 async def notify_approval(ctx: TurnContext):
-                    await ctx.send_activity(f"🎉 Таны чөлөөний хүсэлт зөвшөөрөгдлөө!\n📅 {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног)\n✨ Сайхан амралтаа!")
+                    await ctx.send_activity(f"🎉 Таны чөлөөний хүсэлт зөвшөөрөгдлөө!\n📅 {request_data['start_date']} - {request_data['end_date']} ({request_data.get('days', 1)} хоног)\n✨ Сайхан амралтаа!")
 
                 await ADAPTER.continue_conversation(
                     requester_conversation,
@@ -967,14 +1088,20 @@ async def handle_adaptive_card_action(context: TurnContext, action_data):
             # Хүсэлт хадгалах
             save_leave_request(request_data)
             
-            # Approver руу баталгаажуулах
-            await context.send_activity(f"❌ Чөлөөний хүсэлт татгалзагдлаа\n👤 {request_data['requester_name']}\n📅 {request_data['start_date']} - {request_data['end_date']}")
+            # Статус card үүсгэх ба илгээх
+            status_card = create_status_card("rejected", "reject")
+            adaptive_card_attachment = Attachment(
+                content_type="application/vnd.microsoft.card.adaptive",
+                content=status_card
+            )
+            status_message = MessageFactory.attachment(adaptive_card_attachment)
+            await context.send_activity(status_message)
             
             # Хүсэлт гаргагч руу мэдэгдэх
             requester_conversation = load_conversation_reference(request_data["requester_user_id"])
             if requester_conversation:
                 async def notify_rejection(ctx: TurnContext):
-                    await ctx.send_activity(f"❌ Таны чөлөөний хүсэлт татгалзагдлаа\n📅 {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног)\n💬 Нэмэлт мэдээллийн хэрэгтэй бол удирдлагатайгаа ярилцана уу.")
+                    await ctx.send_activity(f"❌ Таны чөлөөний хүсэлт татгалзагдлаа\n📅 {request_data['start_date']} - {request_data['end_date']} ({request_data.get('days', 1)} хоног)\n💬 Нэмэлт мэдээллийн хэрэгтэй бол удирдлагатайгаа ярилцана уу.")
 
                 await ADAPTER.continue_conversation(
                     requester_conversation,
@@ -1214,13 +1341,13 @@ def is_confirmation_response(text):
     # Зөвшөөрөх үгүүд
     approve_words = [
         'тийм', 'зөв', 'yes', 'зөвшөөрнө', 'илгээ', 'ok', 'okay', 
-        'зөвшөөрөх', 'баталгаажуулна', 'болно', 'тийм шүү', 'зөв байна'
+        'зөвшөөрөх', 'баталгаажуулна', 'болно', 'тийм шүү', 'зөв байна', "tiim"
     ]
     
     # Татгалзах үгүүд  
     reject_words = [
         'үгүй', 'буруу', 'no', 'татгалзана', 'битгий', 'болохгүй',
-        'засна', 'шинээр', 'дахин', 'өөрчлөх', 'зөв биш'
+        'засна', 'шинээр', 'дахин', 'өөрчлөх', 'зөв биш', 'ugui', 'ugu', 'gu', 'zasna', 'zasan', 'zasnaa'
     ]
     
     for word in approve_words:
@@ -1235,12 +1362,23 @@ def is_confirmation_response(text):
 
 def create_confirmation_message(parsed_data):
     """Баталгаажуулалтын мессеж үүсгэх"""
+    
+    inactive_hours = parsed_data.get('inactive_hours', 8)
+    days = parsed_data.get('days', 1)
+    
+    # Цагийн хэмжээг харуулах
+    if inactive_hours < 8:
+        duration_text = f"🕒 **Цагийн тоо:** {inactive_hours} цаг"
+    elif inactive_hours == 8:
+        duration_text = f"⏰ **Хугацаа:** 1 хоног (8 цаг)"
+    else:
+        duration_text = f"⏰ **Хугацаа:** {days} хоног ({inactive_hours} цаг)"
+    
     message = f"""🔍 Таны чөлөөний хүсэлтээс дараах мэдээллийг олж авлаа:
 
 📅 **Эхлэх огноо:** {parsed_data.get('start_date')}
 📅 **Дуусах огноо:** {parsed_data.get('end_date')}  
-⏰ **Хоногийн тоо:** {parsed_data.get('days')} хоног
-🕒 **Цагийн тоо:** {parsed_data.get('inactive_hours')} цаг
+{duration_text}
 💭 **Шалтгаан:** {parsed_data.get('reason')}
 
 ❓ **Энэ мэдээлэл зөв бөгөөд менежер руу илгээхийг зөвшөөрч байна уу?**
