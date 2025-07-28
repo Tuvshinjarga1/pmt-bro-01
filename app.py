@@ -159,8 +159,17 @@ def parse_leave_request(text, user_name):
             logger.warning("OpenAI API key not configured, falling back to simple parsing")
             return parse_leave_request_simple(text, user_name)
         
+        # Өнөөдрийн огноог AI-д өгөх
+        today = datetime.now()
+        today_str = today.strftime("%Y-%m-%d")
+        tomorrow = today + timedelta(days=1)
+        tomorrow_str = tomorrow.strftime("%Y-%m-%d")
+        
         prompt = f"""
 Та чөлөөний хүсэлт боловсруулах туслах юм. Доорх мессежээс database.Absence struct-д оруулах мэдээллийг гаргаж, JSON хэлбэрээр буцаа.
+
+ӨНӨӨДРИЙН ОГНОО: {today_str} ({today.strftime("%A")})
+МАРГААШИЙН ОГНОО: {tomorrow_str} ({tomorrow.strftime("%A")})
 
 Хэрэглэгч: {user_name}
 Мессеж: "{text}"
@@ -183,14 +192,20 @@ type Absence struct {{
 - needs_clarification: Нэмэлт мэдээлэл хэрэгтэй эсэх (true/false)
 - questions: Хэрэв needs_clarification true бол асуух асуултууд
 
-Дүрэм:
-- Хэрэв огноо тодорхойгүй бол тодорхой бол тодруулж асуух
+ЧУХАЛ ДҮРЭМ:
+- "МАРГААШ" = {tomorrow_str}
+- "ӨНӨӨДӨР" = {today_str}
+- "ХОЁР ӨДРИЙН ДАРАА" = {(today + timedelta(days=2)).strftime("%Y-%m-%d")}
+- "ЭНЭ ДОЛОО ХОНОГ" = одоогийн долоо хоногт
+- "ДАРААГИЙН ДОЛОО ХОНОГ" = дараагийн долоо хоногт
+- Хэрэв огноо тодорхойгүй бол тодорхой болж асуух
 - Хэрэв хоногийн тоо байхгүй бол 1 хоног (8 цаг) гэж үзэх
 - InActiveHours = хоногийн тоо × 8 (8 цагийн ажлын өдөр)
 - Хэрэв шалтгаан байхгүй бол "Хувийн шаардлага" гэж үзэх
-- Монгол хэл дээрх огноо, цаг хугацааг ойлгох ("маргааш", "энэ долоо хоног", "хоёр хоног" гэх мэт)
 - Status үргэлж "pending" байна
 - Хэрэв мэдээлэл дутуу бол needs_clarification = true болгож асуултууд нэмэх
+
+ӨНӨӨДРИЙН ОГНОО ({today_str})-ийг үндэслэн тооцоол хийнэ үү!
 
 JSON буцаа:
 """
@@ -198,7 +213,7 @@ JSON буцаа:
         response = openai_client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "Та чөлөөний хүсэлт боловсруулах туслах. Монгол хэл дээрх байгалийн хэлийг ойлгож, database.Absence struct-д тохирох бүтцлэгдсэн мэдээлэл гаргадаг."},
+                {"role": "system", "content": f"Та чөлөөний хүсэлт боловсруулах туслах. Монгол хэл дээрх байгалийн хэлийг ойлгож, database.Absence struct-д тохирох бүтцлэгдсэн мэдээлэл гаргадаг. ӨНӨӨДРИЙН ОГНОО: {today_str}. 'Маргааш' гэсэн үг {tomorrow_str} гэсэн үг юм."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.1,
@@ -255,14 +270,30 @@ JSON буцаа:
 def parse_leave_request_simple(text, user_name):
     """Энгийн regex ашиглах fallback функц"""
     
+    # Өнөөдрийн огноо олох
+    today = datetime.now()
+    
     # Хоногийн тоо олох
     days_match = re.search(r'(\d+)\s*(?:хоног|өдөр|day)', text.lower())
     days = int(days_match.group(1)) if days_match else 1
     
-    # Default values
-    today = datetime.now()
-    start_date = today.strftime("%Y-%m-%d")
-    end_date = (today + timedelta(days=days-1)).strftime("%Y-%m-%d")
+    # Start date тодорхойлох
+    text_lower = text.lower()
+    if 'маргааш' in text_lower:
+        start_date = (today + timedelta(days=1)).strftime("%Y-%m-%d")
+    elif 'өнөөдөр' in text_lower:
+        start_date = today.strftime("%Y-%m-%d")
+    elif 'хоёр өдрийн дараа' in text_lower:
+        start_date = (today + timedelta(days=2)).strftime("%Y-%m-%d")
+    elif 'гурав өдрийн дараа' in text_lower or '3 өдрийн дараа' in text_lower:
+        start_date = (today + timedelta(days=3)).strftime("%Y-%m-%d")
+    else:
+        # Default - өнөөдөр
+        start_date = today.strftime("%Y-%m-%d")
+    
+    # End date тооцоолох
+    start_date_obj = datetime.strptime(start_date, "%Y-%m-%d")
+    end_date = (start_date_obj + timedelta(days=days-1)).strftime("%Y-%m-%d")
     
     # Шалтгаан гаргах
     reason_keywords = ['учир', 'шалтгаан', 'because', 'reason', 'for']
@@ -362,10 +393,96 @@ async def handle_leave_request_message(context: TurnContext, text, user_id, user
         logger.error(f"Error handling leave request message: {str(e)}")
         await context.send_activity(f"❌ Чөлөөний хүсэлт боловсруулахад алдаа гарлаа: {str(e)}")
 
-# async def forward_message_to_admin(text, user_name, user_id):
-#     """Ердийн мессежийг админд adaptive card-тай дамжуулах - LEGACY FUNCTION"""
-#     # Энэ функц одоо ашиглагдахгүй - баталгаажуулалтын процесс нэмэгдсэн
-#     pass
+async def forward_message_to_admin(text, user_name, user_id):
+    """Ердийн мессежийг админд adaptive card-тай дамжуулах"""
+    try:        
+        approver_conversation = load_conversation_reference(APPROVER_USER_ID)
+        
+        if approver_conversation:
+            # Энгийн мессежээс чөлөөний хүсэлт үүсгэх
+            parsed_data = parse_leave_request(text, user_name)
+            
+            # Хэрэв AI нь нэмэлт мэдээлэл хэрэгтэй гэж үзвэл
+            if parsed_data.get('needs_clarification', False):
+                questions = parsed_data.get('questions', [])
+                if questions:
+                    # Хэрэглэгчээс нэмэлт мэдээлэл асуух
+                    question_text = "🤔 Чөлөөний хүсэлтийг боловсруулахын тулд нэмэлт мэдээлэл хэрэгтэй байна:\n\n"
+                    for i, question in enumerate(questions, 1):
+                        question_text += f"{i}. {question}\n"
+                    question_text += "\nДахин мессеж илгээж дэлгэрэнгүй мэдээлэл өгнө үү."
+                    
+                    # Хэрэглэгчээс асуулт асуух логик нэмэх хэрэгтэй
+                    # Одоогоор зөвхөн админд мэдэгдэх
+                    async def notify_admin_clarification(ctx: TurnContext):
+                        await ctx.send_activity(f"❓ {user_name} нэмэлт мэдээлэл хэрэгтэй:\n💬 Анхны мессеж: \"{text}\"\n🤔 Асуултууд: {', '.join(questions)}")
+                    
+                    await ADAPTER.continue_conversation(
+                        approver_conversation,
+                        notify_admin_clarification,
+                        app_id
+                    )
+                    logger.info(f"Clarification needed message sent to admin from {user_id}")
+                    return
+            
+            request_id = str(uuid.uuid4())
+            
+            # Хүсэлт гаргагчийн мэдээлэл олох
+            requester_info = None
+            all_users = list_all_users()
+            
+            for user in all_users:
+                if user["user_id"] == user_id:
+                    requester_info = user
+                    break
+            
+            # Хүсэлтийн мэдээлэл бэлтгэх
+            request_data = {
+                "request_id": request_id,
+                "requester_email": requester_info.get("email") if requester_info else "unknown@fibo.cloud",
+                "requester_name": user_name,
+                "requester_user_id": user_id,
+                "start_date": parsed_data["start_date"],
+                "end_date": parsed_data.get("end_date"),
+                "days": parsed_data["days"],
+                "reason": parsed_data["reason"],
+                "inactive_hours": parsed_data.get("inactive_hours", parsed_data["days"] * 8),
+                "status": parsed_data.get("status", "pending"),
+                "original_message": text,
+                "created_at": datetime.now().isoformat(),
+                "approver_email": APPROVER_EMAIL,
+                "approver_user_id": APPROVER_USER_ID
+            }
+            
+            # Хүсэлт хадгалах
+            save_leave_request(request_data)
+            
+            # Adaptive card үүсгэх
+            approval_card = create_approval_card(request_data)
+            
+            async def notify_admin_with_card(ctx: TurnContext):
+                adaptive_card_attachment = Attachment(
+                    content_type="application/vnd.microsoft.card.adaptive",
+                    content=approval_card
+                )
+                message = MessageFactory.attachment(adaptive_card_attachment)
+                message.text = f"📨 Шинэ мессеж: {user_name}\n💬 Анхны мессеж: \"{text}\"\n🤖 AI ойлголт: {parsed_data.get('days')} хоног, {parsed_data.get('reason')}"
+                await ctx.send_activity(message)
+            
+            await ADAPTER.continue_conversation(
+                approver_conversation,
+                notify_admin_with_card,
+                app_id
+            )
+            logger.info(f"Message with adaptive card forwarded to admin from {user_id}")
+        else:
+            logger.warning(f"Approver conversation reference not found. Approver needs to message the bot first.")
+            # Approver conversation байхгүй тул мессежийг log-д хадгална
+            logger.info(f"Pending message for admin: {user_name} said: {text}")
+    except Exception as e:
+        logger.error(f"Error forwarding message to admin: {str(e)}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
 
 def save_conversation_reference(activity):
     """Хэрэглэгчийн conversation reference болон нэмэлт мэдээллийг хадгалах функц"""
@@ -533,141 +650,14 @@ def find_user_by_conversation_id(conversation_id):
             return user
     return None
 
-def save_pending_confirmation(user_id, request_data):
-    """Хэрэглэгчийн баталгаажуулалтыг хүлээж буй мэдээллийг хадгалах"""
-    try:
-        safe_user_id = user_id.replace(":", "_").replace("/", "_").replace("\\", "_")
-        filename = f"{PENDING_CONFIRMATIONS_DIR}/pending_{safe_user_id}.json"
-        
-        confirmation_data = {
-            "user_id": user_id,
-            "request_data": request_data,
-            "created_at": datetime.now().isoformat(),
-            "status": "awaiting_confirmation"
-        }
-        
-        with open(filename, "w", encoding="utf-8") as f:
-            json.dump(confirmation_data, f, ensure_ascii=False, indent=2)
-        
-        logger.info(f"Saved pending confirmation for user {user_id}")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to save pending confirmation: {str(e)}")
-        return False
-
-def load_pending_confirmation(user_id):
-    """Хэрэглэгчийн баталгаажуулалтыг хүлээж буй мэдээллийг унших"""
-    try:
-        safe_user_id = user_id.replace(":", "_").replace("/", "_").replace("\\", "_")
-        filename = f"{PENDING_CONFIRMATIONS_DIR}/pending_{safe_user_id}.json"
-        
-        if not os.path.exists(filename):
-            return None
-        
-        with open(filename, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        logger.error(f"Failed to load pending confirmation for user {user_id}: {str(e)}")
-        return None
-
-def delete_pending_confirmation(user_id):
-    """Хэрэглэгчийн баталгаажуулалтыг хүлээж буй мэдээллийг устгах"""
-    try:
-        safe_user_id = user_id.replace(":", "_").replace("/", "_").replace("\\", "_")
-        filename = f"{PENDING_CONFIRMATIONS_DIR}/pending_{safe_user_id}.json"
-        
-        if os.path.exists(filename):
-            os.remove(filename)
-            logger.info(f"Deleted pending confirmation for user {user_id}")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to delete pending confirmation: {str(e)}")
-        return False
-
-def is_confirmation_response(text):
-    """Мессеж нь баталгаажуулалтын хариу эсэхийг шалгах"""
-    text_lower = text.lower().strip()
-    
-    # Зөвшөөрөх үгүүд
-    approve_words = [
-        'тийм', 'зөв', 'yes', 'зөвшөөрнө', 'илгээ', 'ok', 'okay', 
-        'зөвшөөрөх', 'баталгаажуулна', 'болно', 'тийм шүү', 'зөв байна'
-    ]
-    
-    # Татгалзах үгүүд  
-    reject_words = [
-        'үгүй', 'буруу', 'no', 'татгалзана', 'битгий', 'болохгүй',
-        'засна', 'шинээр', 'дахин', 'өөрчлөх', 'зөв биш'
-    ]
-    
-    for word in approve_words:
-        if word in text_lower:
-            return "approve"
-    
-    for word in reject_words:
-        if word in text_lower:
-            return "reject"
-    
-    return None
-
-def create_confirmation_message(parsed_data):
-    """Баталгаажуулалтын мессеж үүсгэх"""
-    message = f"""🔍 Таны чөлөөний хүсэлтээс дараах мэдээллийг олж авлаа:
-
-📅 **Эхлэх огноо:** {parsed_data.get('start_date')}
-📅 **Дуусах огноо:** {parsed_data.get('end_date')}  
-⏰ **Хоногийн тоо:** {parsed_data.get('days')} хоног
-🕒 **Цагийн тоо:** {parsed_data.get('inactive_hours')} цаг
-💭 **Шалтгаан:** {parsed_data.get('reason')}
-
-❓ **Энэ мэдээлэл зөв бөгөөд менежер руу илгээхийг зөвшөөрч байна уу?**
-
-💬 Хариулна уу:
-• **"Тийм"** эсвэл **"Зөв"** - Илгээх
-• **"Үгүй"** эсвэл **"Засна"** - Засварлах"""
-
-    return message
-
-async def send_approved_request_to_manager(request_data, original_message):
-    """Баталгаажуулсан чөлөөний хүсэлтийг менежер руу илгээх"""
-    try:
-        approver_conversation = load_conversation_reference(APPROVER_USER_ID)
-        
-        if approver_conversation:
-            # Adaptive card үүсгэх
-            approval_card = create_approval_card(request_data)
-            
-            async def notify_manager_with_card(ctx: TurnContext):
-                adaptive_card_attachment = Attachment(
-                    content_type="application/vnd.microsoft.card.adaptive",
-                    content=approval_card
-                )
-                message = MessageFactory.attachment(adaptive_card_attachment)
-                message.text = f"📨 Баталгаажсан чөлөөний хүсэлт: {request_data['requester_name']}\n💬 Анхны мессеж: \"{original_message}\"\n✅ Хэрэглэгч баталгаажуулсан"
-                await ctx.send_activity(message)
-            
-            await ADAPTER.continue_conversation(
-                approver_conversation,
-                notify_manager_with_card,
-                app_id
-            )
-            logger.info(f"Approved leave request {request_data['request_id']} sent to manager")
-        else:
-            logger.warning(f"Manager conversation reference not found for request {request_data['request_id']}")
-    except Exception as e:
-        logger.error(f"Error sending approved request to manager: {str(e)}")
-
 @app.route("/", methods=["GET"])
 def health_check():
-    pending_confirmations = len([f for f in os.listdir(PENDING_CONFIRMATIONS_DIR) if f.startswith("pending_")]) if os.path.exists(PENDING_CONFIRMATIONS_DIR) else 0
-    
     return jsonify({
         "status": "running",
         "message": "Flask Bot Server is running",
         "endpoints": ["/api/messages", "/proactive-message", "/users", "/broadcast", "/leave-request", "/approval-callback", "/send-by-conversation"],
         "app_id_configured": bool(os.getenv("MICROSOFT_APP_ID")),
-        "stored_users": len(list_all_users()),
-        "pending_confirmations": pending_confirmations
+        "stored_users": len(list_all_users())
     })
 
 @app.route("/users", methods=["GET"])
@@ -814,40 +804,7 @@ def process_messages():
                         
                         # Зөвхөн Bayarmunkh биш хэрэглэгчдийн мессежийг боловсруулах
                         if user_id != APPROVER_USER_ID:
-                            # Хэрэв хэрэглэгчтэй pending confirmation байвал
-                            pending_confirmation = load_pending_confirmation(user_id)
-                            
-                            if pending_confirmation:
-                                # Баталгаажуулалтын хариу шалгах
-                                confirmation_response = is_confirmation_response(user_text)
-                                
-                                if confirmation_response == "approve":
-                                    # Зөвшөөрсөн - менежер руу илгээх
-                                    request_data = pending_confirmation["request_data"]
-                                    
-                                    # Баталгаажуулалт устгах
-                                    delete_pending_confirmation(user_id)
-                                    
-                                    # Хүсэлт хадгалах
-                                    save_leave_request(request_data)
-                                    
-                                    await context.send_activity("✅ Чөлөөний хүсэлт баталгаажсан!\n📤 Менежер руу илгээгдэж байна...")
-                                    
-                                    # Менежер руу илгээх
-                                    await send_approved_request_to_manager(request_data, user_text)
-                                    
-                                elif confirmation_response == "reject":
-                                    # Татгалзсан - дахин оруулахыг хүсэх
-                                    delete_pending_confirmation(user_id)
-                                    await context.send_activity("❌ Баталгаажуулалт цуцлагдлаа.\n\n🔄 Чөлөөний хүсэлтээ дахин илгээнэ үү. Дэлгэрэнгүй мэдээлэлтэй бичнэ үү.")
-                                    
-                                else:
-                                    # Ойлгомжгүй хариу
-                                    await context.send_activity('🤔 Ойлгосонгүй. "Тийм" эсвэл "Үгүй" гэж хариулна уу.\n\n• **"Тийм"** - Менежер руу илгээх\n• **"Үгүй"** - Засварлах')
-                                
-                                return
-                            
-                            # Шинэ хүсэлт - AI ашиглаж parse хийх
+                            # AI ашиглаж мессежийг урьдчилан шинжилж үзэх
                             parsed_data = parse_leave_request(user_text, user_name)
                             
                             # Хэрэв AI нь нэмэлт мэдээлэл хэрэгтэй гэж үзвэл
@@ -864,44 +821,11 @@ def process_messages():
                                     logger.info(f"Asked clarification questions to user {user_id}")
                                     return
                             
-                            # Мэдээлэл хангалттай - баталгаажуулалт асуух
-                            # Request data бэлтгэх
-                            request_id = str(uuid.uuid4())
+                            # Бүх мессежийг хэрэглэгчид хариулах
+                            await context.send_activity(f"✅ Таны чөлөөний хүсэлтийг хүлээн авлаа!\n📅 {parsed_data.get('start_date')} - {parsed_data.get('end_date')} ({parsed_data.get('days')} хоног)\n💭 {parsed_data.get('reason')}\n⏳ Зөвшөөрөлийн хүлээлгэд байна...")
                             
-                            # Хэрэглэгчийн мэдээлэл олох
-                            requester_info = None
-                            all_users = list_all_users()
-                            for user in all_users:
-                                if user["user_id"] == user_id:
-                                    requester_info = user
-                                    break
-                            
-                            request_data = {
-                                "request_id": request_id,
-                                "requester_email": requester_info.get("email") if requester_info else "unknown@fibo.cloud",
-                                "requester_name": user_name,
-                                "requester_user_id": user_id,
-                                "start_date": parsed_data["start_date"],
-                                "end_date": parsed_data.get("end_date"),
-                                "days": parsed_data["days"],
-                                "reason": parsed_data["reason"],
-                                "inactive_hours": parsed_data.get("inactive_hours", parsed_data["days"] * 8),
-                                "status": parsed_data.get("status", "pending"),
-                                "original_message": user_text,
-                                "created_at": datetime.now().isoformat(),
-                                "approver_email": APPROVER_EMAIL,
-                                "approver_user_id": APPROVER_USER_ID
-                            }
-                            
-                            # Pending confirmation хадгалах
-                            save_pending_confirmation(user_id, request_data)
-                            
-                            # Баталгаажуулалт асуух
-                            confirmation_message = create_confirmation_message(parsed_data)
-                            await context.send_activity(confirmation_message)
-                            
-                            logger.info(f"Asked for confirmation from user {user_id}")
-                            
+                            # Bayarmunkh руү adaptive card дамжуулах
+                            await forward_message_to_admin(user_text, user_name, user_id)
                         else:
                             # Bayarmunkh өөрийн мессеж - зөвхөн echo хариу
                             await context.send_activity(f"Таны мессежийг хүлээн авлаа: {user_text}")
