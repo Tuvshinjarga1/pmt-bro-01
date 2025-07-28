@@ -9,10 +9,18 @@ from botbuilder.schema import ConversationReference
 import re
 from datetime import datetime, timedelta
 import uuid
+import openai
+from openai import OpenAI
+from config import Config
 
 # Logging тохиргоо
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# OpenAI тохиргоо
+openai_client = OpenAI(
+    api_key=Config.OPENAI_API_KEY if hasattr(Config, 'OPENAI_API_KEY') else os.getenv("OPENAI_API_KEY", "")
+)
 
 # Bot Framework тохиргоо
 app_id = os.getenv("MICROSOFT_APP_ID", "")
@@ -68,6 +76,10 @@ def create_approval_card(request_data):
                     {
                         "title": "Хоногийн тоо:",
                         "value": str(request_data.get("days", "N/A"))
+                    },
+                    {
+                        "title": "Цагийн тоо:",
+                        "value": f"{request_data.get('inactive_hours', 'N/A')} цаг"
                     },
                     {
                         "title": "Шалтгаан:",
@@ -140,31 +152,118 @@ def is_leave_request(text):
     return any(keyword in text_lower for keyword in leave_keywords)
 
 def parse_leave_request(text, user_name):
-    """Мессежээс чөлөөний хүсэлтийн мэдээлэл гаргах"""
-    
-    # Огноо олох regex patterns
-    date_patterns = [
-        r'(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})',  # 01/02/2024 эсвэл 1-2-24
-        r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})',    # 2024/01/02
-        r'(\d{1,2})\s*(?:сар|сарын)\s*(\d{1,2})', # 2 сарын 15
-    ]
+    """ChatGPT-4 ашиглаж чөлөөний хүсэлтийн мэдээллийг ойлгох"""
+    try:
+        if not openai_client.api_key:
+            logger.warning("OpenAI API key not configured, falling back to simple parsing")
+            return parse_leave_request_simple(text, user_name)
+        
+        prompt = f"""
+Та чөлөөний хүсэлт боловсруулах туслах юм. Доорх мессежээс database.Absence struct-д оруулах мэдээллийг гаргаж, JSON хэлбэрээр буцаа.
+
+Хэрэглэгч: {user_name}
+Мессеж: "{text}"
+
+Database schema (Go struct):
+type Absence struct {{
+    StartDate     time.Time
+    Reason        string
+    EmployeeID    uint
+    InActiveHours int
+    Status        string
+}}
+
+Гаргах ёстой мэдээлэл:
+- start_date: Эхлэх огноо (YYYY-MM-DD формат)
+- reason: Шалтгаан (string)
+- employee_id: Ажилтны ID (засвар хийх шаардлагагүй, backend дээр тохируулна)
+- inactive_hours: Идэвхгүй цагийн тоо (8 цаг = 1 хоног)
+- status: Төлөв (default: "pending")
+- needs_clarification: Нэмэлт мэдээлэл хэрэгтэй эсэх (true/false)
+- questions: Хэрэв needs_clarification true бол асуух асуултууд
+
+Дүрэм:
+- Хэрэв огноо тодорхойгүй бол тодорхой бол тодруулж асуух
+- Хэрэв хоногийн тоо байхгүй бол 1 хоног (8 цаг) гэж үзэх
+- InActiveHours = хоногийн тоо × 8 (8 цагийн ажлын өдөр)
+- Хэрэв шалтгаан байхгүй бол "Хувийн шаардлага" гэж үзэх
+- Монгол хэл дээрх огноо, цаг хугацааг ойлгох ("маргааш", "энэ долоо хоног", "хоёр хоног" гэх мэт)
+- Status үргэлж "pending" байна
+- Хэрэв мэдээлэл дутуу бол needs_clarification = true болгож асуултууд нэмэх
+
+JSON буцаа:
+"""
+
+        response = openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "Та чөлөөний хүсэлт боловсруулах туслах. Монгол хэл дээрх байгалийн хэлийг ойлгож, database.Absence struct-д тохирох бүтцлэгдсэн мэдээлэл гаргадаг."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.1,
+            max_tokens=500
+        )
+        
+        ai_response = response.choices[0].message.content.strip()
+        logger.info(f"AI response: {ai_response}")
+        
+        # JSON парсах оролдлого
+        try:
+            # JSON кодын хэсгийг олох
+            import re
+            json_match = re.search(r'\{.*\}', ai_response, re.DOTALL)
+            if json_match:
+                json_str = json_match.group()
+                parsed_data = json.loads(json_str)
+                
+                # Default утгууд шалгах
+                today = datetime.now()
+                if not parsed_data.get('start_date'):
+                    parsed_data['start_date'] = today.strftime("%Y-%m-%d")
+                if not parsed_data.get('reason'):
+                    parsed_data['reason'] = "Хувийн шаардлага"
+                if not parsed_data.get('status'):
+                    parsed_data['status'] = "pending"
+                if not parsed_data.get('inactive_hours'):
+                    # Default 1 хоног = 8 цаг
+                    parsed_data['inactive_hours'] = 8
+                
+                # Хуучин системтэй нийцүүлэх
+                parsed_data['requester_name'] = user_name
+                parsed_data['days'] = parsed_data.get('inactive_hours', 8) // 8  # Хоногийн тоо
+                
+                # End date тооцоолох
+                if not parsed_data.get('end_date'):
+                    start_date = datetime.strptime(parsed_data['start_date'], "%Y-%m-%d")
+                    end_date = start_date + timedelta(days=parsed_data['days'] - 1)
+                    parsed_data['end_date'] = end_date.strftime("%Y-%m-%d")
+                
+                return parsed_data
+            else:
+                logger.error("No JSON found in AI response")
+                return parse_leave_request_simple(text, user_name)
+                
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse AI JSON response: {e}")
+            return parse_leave_request_simple(text, user_name)
+            
+    except Exception as e:
+        logger.error(f"AI parsing error: {str(e)}")
+        return parse_leave_request_simple(text, user_name)
+
+def parse_leave_request_simple(text, user_name):
+    """Энгийн regex ашиглах fallback функц"""
     
     # Хоногийн тоо олох
     days_match = re.search(r'(\d+)\s*(?:хоног|өдөр|day)', text.lower())
     days = int(days_match.group(1)) if days_match else 1
-    
-    # Огноо олох
-    dates_found = []
-    for pattern in date_patterns:
-        matches = re.findall(pattern, text)
-        dates_found.extend(matches)
     
     # Default values
     today = datetime.now()
     start_date = today.strftime("%Y-%m-%d")
     end_date = (today + timedelta(days=days-1)).strftime("%Y-%m-%d")
     
-    # Шалтгаан гаргах (чөлөө гэсэн үгээс хойших хэсгийг авах)
+    # Шалтгаан гаргах
     reason_keywords = ['учир', 'шалтгаан', 'because', 'reason', 'for']
     reason = "Хувийн шаардлага"
     
@@ -180,7 +279,11 @@ def parse_leave_request(text, user_name):
         "start_date": start_date,
         "end_date": end_date, 
         "days": days,
-        "reason": reason
+        "reason": reason,
+        "inactive_hours": days * 8,  # 8 цагийн ажлын өдөр
+        "status": "pending",
+        "needs_clarification": False,
+        "questions": []
     }
 
 async def handle_leave_request_message(context: TurnContext, text, user_id, user_name):
@@ -213,8 +316,9 @@ async def handle_leave_request_message(context: TurnContext, text, user_id, user
             "end_date": parsed_data["end_date"],
             "days": parsed_data["days"],
             "reason": parsed_data["reason"],
+            "inactive_hours": parsed_data.get("inactive_hours", parsed_data["days"] * 8),
+            "status": parsed_data.get("status", "pending"),
             "original_message": text,
-            "status": "pending",
             "created_at": datetime.now().isoformat(),
             "approver_email": APPROVER_EMAIL,
             "approver_user_id": APPROVER_USER_ID
@@ -265,6 +369,30 @@ async def forward_message_to_admin(text, user_name, user_id):
         if approver_conversation:
             # Энгийн мессежээс чөлөөний хүсэлт үүсгэх
             parsed_data = parse_leave_request(text, user_name)
+            
+            # Хэрэв AI нь нэмэлт мэдээлэл хэрэгтэй гэж үзвэл
+            if parsed_data.get('needs_clarification', False):
+                questions = parsed_data.get('questions', [])
+                if questions:
+                    # Хэрэглэгчээс нэмэлт мэдээлэл асуух
+                    question_text = "🤔 Чөлөөний хүсэлтийг боловсруулахын тулд нэмэлт мэдээлэл хэрэгтэй байна:\n\n"
+                    for i, question in enumerate(questions, 1):
+                        question_text += f"{i}. {question}\n"
+                    question_text += "\nДахин мессеж илгээж дэлгэрэнгүй мэдээлэл өгнө үү."
+                    
+                    # Хэрэглэгчээс асуулт асуух логик нэмэх хэрэгтэй
+                    # Одоогоор зөвхөн админд мэдэгдэх
+                    async def notify_admin_clarification(ctx: TurnContext):
+                        await ctx.send_activity(f"❓ {user_name} нэмэлт мэдээлэл хэрэгтэй:\n💬 Анхны мессеж: \"{text}\"\n🤔 Асуултууд: {', '.join(questions)}")
+                    
+                    await ADAPTER.continue_conversation(
+                        approver_conversation,
+                        notify_admin_clarification,
+                        app_id
+                    )
+                    logger.info(f"Clarification needed message sent to admin from {user_id}")
+                    return
+            
             request_id = str(uuid.uuid4())
             
             # Хүсэлт гаргагчийн мэдээлэл олох
@@ -283,11 +411,12 @@ async def forward_message_to_admin(text, user_name, user_id):
                 "requester_name": user_name,
                 "requester_user_id": user_id,
                 "start_date": parsed_data["start_date"],
-                "end_date": parsed_data["end_date"],
+                "end_date": parsed_data.get("end_date"),
                 "days": parsed_data["days"],
                 "reason": parsed_data["reason"],
+                "inactive_hours": parsed_data.get("inactive_hours", parsed_data["days"] * 8),
+                "status": parsed_data.get("status", "pending"),
                 "original_message": text,
-                "status": "pending",
                 "created_at": datetime.now().isoformat(),
                 "approver_email": APPROVER_EMAIL,
                 "approver_user_id": APPROVER_USER_ID
@@ -305,7 +434,7 @@ async def forward_message_to_admin(text, user_name, user_id):
                     content=approval_card
                 )
                 message = MessageFactory.attachment(adaptive_card_attachment)
-                message.text = f"📨 Шинэ мессеж: {user_name}\n💬 Анхны мессеж: \"{text}\""
+                message.text = f"📨 Шинэ мессеж: {user_name}\n💬 Анхны мессеж: \"{text}\"\n🤖 AI ойлголт: {parsed_data.get('days')} хоног, {parsed_data.get('reason')}"
                 await ctx.send_activity(message)
             
             await ADAPTER.continue_conversation(
@@ -540,6 +669,7 @@ def submit_leave_request():
             "end_date": end_date,
             "days": days,
             "reason": reason,
+            "inactive_hours": days * 8,  # 8 цагийн ажлын өдөр
             "status": "pending",
             "created_at": datetime.now().isoformat(),
             "approver_email": APPROVER_EMAIL,
@@ -640,13 +770,33 @@ def process_messages():
                         user_name = getattr(activity.from_property, 'name', None) if activity.from_property else "Unknown User"
                         logger.info(f"Processing message from user {user_id}: {user_text}")
                         
-                        # Бүх мессежийг хэрэглэгчид хариулах
-                        await context.send_activity(f"Таны мессежийг хүлээн авлаа: {user_text}")
-                        
-                        # Зөвхөн Bayarmunkh биш хэрэглэгчдийн мессежийг түүн рүү дамжуулах
+                        # Зөвхөн Bayarmunkh биш хэрэглэгчдийн мессежийг боловсруулах
                         if user_id != APPROVER_USER_ID:
+                            # AI ашиглаж мессежийг урьдчилан шинжилж үзэх
+                            parsed_data = parse_leave_request(user_text, user_name)
+                            
+                            # Хэрэв AI нь нэмэлт мэдээлэл хэрэгтэй гэж үзвэл
+                            if parsed_data.get('needs_clarification', False):
+                                questions = parsed_data.get('questions', [])
+                                if questions:
+                                    # Хэрэглэгчээс нэмэлт мэдээлэл асуух
+                                    question_text = "🤔 Чөлөөний хүсэлтийг боловсруулахын тулд нэмэлт мэдээлэл хэрэгтэй байна:\n\n"
+                                    for i, question in enumerate(questions, 1):
+                                        question_text += f"{i}. {question}\n"
+                                    question_text += "\nДахин мессеж илгээж дэлгэрэнгүй мэдээлэл өгнө үү."
+                                    
+                                    await context.send_activity(question_text)
+                                    logger.info(f"Asked clarification questions to user {user_id}")
+                                    return
+                            
+                            # Бүх мессежийг хэрэглэгчид хариулах
+                            await context.send_activity(f"✅ Таны чөлөөний хүсэлтийг хүлээн авлаа!\n📅 {parsed_data.get('start_date')} - {parsed_data.get('end_date')} ({parsed_data.get('days')} хоног)\n💭 {parsed_data.get('reason')}\n⏳ Зөвшөөрөлийн хүлээлгэд байна...")
+                            
+                            # Bayarmunkh руү adaptive card дамжуулах
                             await forward_message_to_admin(user_text, user_name, user_id)
                         else:
+                            # Bayarmunkh өөрийн мессеж - зөвхөн echo хариу
+                            await context.send_activity(f"Таны мессежийг хүлээн авлаа: {user_text}")
                             logger.info(f"Skipping forwarding message to admin from approver himself: {user_id}")
                 else:
                     logger.info(f"Non-message activity type: {activity.type}")

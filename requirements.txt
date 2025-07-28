@@ -1,10 +1,9 @@
-flask
-aiohttp
 botbuilder-core
 botbuilder-schema
-openai
-python-dotenv
-gunicorn
+flask
+asyncio
+aiofiles
+werkzeug
 requests
-azure-identity
-msgraph-sdk
+python-dotenv
+openai
