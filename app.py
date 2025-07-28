@@ -1000,7 +1000,7 @@ def proactive_message():
             conversation_reference = load_conversation_reference(user_id)
             if not conversation_reference:
                 return jsonify({"error": f"User {user_id} not found"}), 404
-                else:
+        else:
             # Хуучин арга: conversation_reference.json файлаас унших
             try:
                 with open("conversation_reference.json", "r", encoding="utf-8") as f:
