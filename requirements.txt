@@ -7,3 +7,4 @@ werkzeug
 requests
 python-dotenv
 openai
+aiohttp
