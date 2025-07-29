@@ -14,6 +14,14 @@ from openai import OpenAI
 from config import Config
 import requests
 
+# Microsoft Planner tasks авах
+try:
+    from get_tasks import get_access_token, MicrosoftPlannerTasksAPI
+    PLANNER_AVAILABLE = True
+except ImportError:
+    PLANNER_AVAILABLE = False
+    logging.warning("get_tasks module not found. Planner functionality disabled.")
+
 # Logging тохиргоо
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -112,6 +120,62 @@ def create_approval_card(request_data):
         ]
     }
     return card
+
+def get_user_planner_tasks(user_email):
+    """Хэрэглэгчийн Microsoft Planner tasks авах"""
+    if not PLANNER_AVAILABLE:
+        return "📋 Planner модуль идэвхгүй байна"
+    
+    try:
+        # Access token авах
+        token = get_access_token()
+        planner_api = MicrosoftPlannerTasksAPI(token)
+        
+        # Хэрэглэгчийн tasks авах
+        tasks = planner_api.get_user_tasks(user_email)
+        
+        if not tasks:
+            return "📋 Planner-д идэвхтэй task олдсонгүй"
+        
+        # Tasks-ийн мэдээллийг форматлах
+        tasks_info = f"📋 **{user_email} - Planner Tasks ({len(tasks)} task):**\n\n"
+        
+        # Зөвхөн идэвхтэй (дуусаагүй) tasks харуулах
+        active_tasks = [task for task in tasks if task.get('percentComplete', 0) < 100]
+        
+        if not active_tasks:
+            return "📋 Planner-д дуусаагүй task олдсонгүй"
+        
+        for i, task in enumerate(active_tasks[:5], 1):  # Зөвхөн эхний 5-г харуулах
+            title = task.get('title', 'Нэргүй task')
+            progress = task.get('percentComplete', 0)
+            priority = task.get('priority', 'N/A')
+            
+            # Due date форматлах
+            due_date = task.get('dueDateTime')
+            due_text = ""
+            if due_date:
+                try:
+                    # ISO datetime парс хийх
+                    dt = datetime.fromisoformat(due_date.replace('Z', '+00:00'))
+                    due_text = f" 📅 {dt.strftime('%m/%d')}"
+                except:
+                    due_text = f" 📅 {due_date[:10]}"
+            
+            priority_emoji = "🔴" if priority == "urgent" else "🟡" if priority == "important" else "🔵"
+            progress_text = f"{progress}%" if progress > 0 else "0%"
+            
+            tasks_info += f"{i}. {priority_emoji} **{title}**\n"
+            tasks_info += f"   📊 {progress_text} дууссан{due_text}\n\n"
+        
+        if len(active_tasks) > 5:
+            tasks_info += f"... болон {len(active_tasks) - 5} бусад task\n"
+        
+        return tasks_info.strip()
+        
+    except Exception as e:
+        logger.error(f"Failed to get planner tasks for {user_email}: {str(e)}")
+        return f"📋 Planner tasks авахад алдаа: {str(e)}"
 
 async def call_external_absence_api(request_data):
     """External API руу absence request үүсгэх дуудлага хийх"""
@@ -319,6 +383,62 @@ async def call_reject_absence_api(absence_id, comment=""):
         }
     except Exception as e:
         logger.error(f"Unexpected error calling external rejection API: {str(e)}")
+        return {
+            "success": False,
+            "error": "Unexpected error",
+            "message": str(e)
+        }
+
+async def send_teams_webhook_notification(requester_name):
+    """Teams webhook руу зөвшөөрөлийн мэдэгдэл илгээх"""
+    try:
+        webhook_url = "https://fibocloudmn.webhook.office.com/webhookb2/661d5c20-ce88-4fc4-ae3f-843ba7b1fecc@3fee1c11-7cdf-44b4-a1b0-5183408e1d89/IncomingWebhook/d835790d3e7844bc8ef8059060ecdd4d/e66e1c65-f5db-4a87-95e1-9dbebc412afe/V2yaMpY1jDY7oxwlTb2D9BMg9M4wCYqKcLWEyQ6h8Q8p81"
+        
+        # Teams webhook payload бэлтгэх
+        payload = {
+            "text": f"{requester_name} чөлөө авсан шүү, манайхаан."
+        }
+        
+        logger.info(f"Sending Teams webhook notification for {requester_name}")
+        
+        # HTTP POST дуудлага хийх
+        response = requests.post(
+            webhook_url,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            logger.info(f"Teams webhook notification sent successfully for {requester_name}")
+            return {
+                "success": True,
+                "message": "Teams notification sent successfully"
+            }
+        else:
+            logger.error(f"Teams webhook error - Status: {response.status_code}, Response: {response.text}")
+            return {
+                "success": False,
+                "error": f"Webhook returned status {response.status_code}",
+                "message": response.text
+            }
+            
+    except requests.exceptions.Timeout:
+        logger.error("Teams webhook timeout")
+        return {
+            "success": False,
+            "error": "Webhook timeout",
+            "message": "Teams webhook request timed out"
+        }
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Teams webhook request error: {str(e)}")
+        return {
+            "success": False,
+            "error": "Request failed",
+            "message": str(e)
+        }
+    except Exception as e:
+        logger.error(f"Unexpected error calling Teams webhook: {str(e)}")
         return {
             "success": False,
             "error": "Unexpected error",
@@ -656,8 +776,16 @@ async def handle_leave_request_message(context: TurnContext, text, user_id, user
                     content_type="application/vnd.microsoft.card.adaptive",
                     content=approval_card
                 )
+                # Planner tasks мэдээлэл авах
+                planner_info = ""
+                if request_data.get("requester_email"):
+                    try:
+                        planner_info = f"\n\n{get_user_planner_tasks(request_data['requester_email'])}"
+                    except Exception as e:
+                        logger.error(f"Failed to get planner tasks for manager notification: {str(e)}")
+                
                 message = MessageFactory.attachment(adaptive_card_attachment)
-                message.text = f"📩 Шинэ чөлөөний хүсэлт: {request_data['requester_name']}\n💬 Анхны мессеж: \"{text}\"{api_status_msg}"
+                message.text = f"📩 Шинэ чөлөөний хүсэлт: {request_data['requester_name']}\n💬 Анхны мессеж: \"{text}\"{api_status_msg}{planner_info}"
                 await ctx.send_activity(message)
             
             await ADAPTER.continue_conversation(
@@ -761,8 +889,16 @@ async def forward_message_to_admin(text, user_name, user_id):
                     content_type="application/vnd.microsoft.card.adaptive",
                     content=approval_card
                 )
+                # Planner tasks мэдээлэл авах
+                planner_info = ""
+                if request_data.get("requester_email"):
+                    try:
+                        planner_info = f"\n\n{get_user_planner_tasks(request_data['requester_email'])}"
+                    except Exception as e:
+                        logger.error(f"Failed to get planner tasks for admin notification: {str(e)}")
+                
                 message = MessageFactory.attachment(adaptive_card_attachment)
-                message.text = f"📨 Шинэ мессеж: {user_name}\n💬 Анхны мессеж: \"{text}\"\n🤖 AI ойлголт: {parsed_data.get('days')} хоног, {parsed_data.get('reason')}{api_status_msg}"
+                message.text = f"📨 Шинэ мессеж: {user_name}\n💬 Анхны мессеж: \"{text}\"\n🤖 AI ойлголт: {parsed_data.get('days')} хоног, {parsed_data.get('reason')}{api_status_msg}{planner_info}"
                 await ctx.send_activity(message)
             
             await ADAPTER.continue_conversation(
@@ -1091,8 +1227,16 @@ def submit_leave_request():
                 content_type="application/vnd.microsoft.card.adaptive",
                 content=approval_card
             )
+            # Planner tasks мэдээлэл авах
+            planner_info = ""
+            if request_data.get("requester_email"):
+                try:
+                    planner_info = f"\n\n{get_user_planner_tasks(request_data['requester_email'])}"
+                except Exception as e:
+                    logger.error(f"Failed to get planner tasks for REST API request: {str(e)}")
+            
             message = MessageFactory.attachment(adaptive_card_attachment)
-            message.text = f"📩 Шинэ чөлөөний хүсэлт: {request_data['requester_name']}\n💬 REST API-аас илгээгдсэн{api_status_msg}"
+            message.text = f"📩 Шинэ чөлөөний хүсэлт: {request_data['requester_name']}\n💬 REST API-аас илгээгдсэн{api_status_msg}{planner_info}"
             await context.send_activity(message)
 
         asyncio.run(
@@ -1268,7 +1412,7 @@ def process_messages():
                             save_pending_confirmation(user_id, request_data)
                             
                             # Баталгаажуулалт асуух
-                            confirmation_message = create_confirmation_message(parsed_data)
+                            confirmation_message = create_confirmation_message(parsed_data, requester_info.get("email"))
                             await context.send_activity(confirmation_message)
                             
                             logger.info(f"Asked for confirmation from user {user_id}")
@@ -1486,6 +1630,14 @@ async def handle_adaptive_card_action(context: TurnContext, action_data):
             # Хүсэлт хадгалах
             save_leave_request(request_data)
             
+            # Teams webhook руу мэдэгдэл илгээх
+            webhook_result = await send_teams_webhook_notification(request_data["requester_name"])
+            webhook_status_msg = ""
+            if webhook_result["success"]:
+                webhook_status_msg = "\n📢 Teams-д мэдэгдэл илгээгдлээ"
+            else:
+                webhook_status_msg = f"\n⚠️ Teams мэдэгдэлд алдаа: {webhook_result.get('message', 'Unknown error')}"
+            
             # Disabled card илгээх
             disabled_card = create_disabled_card("approve")
             adaptive_card_attachment = Attachment(
@@ -1506,7 +1658,7 @@ async def handle_adaptive_card_action(context: TurnContext, action_data):
                         else:
                             approval_status_msg = f"\n⚠️ Системд зөвшөөрөхэд алдаа: {approval_api_result.get('message', 'Unknown error')}"
                     
-                    await ctx.send_activity(f"🎉 Таны чөлөөний хүсэлт зөвшөөрөгдлөө!\n📅 {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног)\n✨ Сайхан амраарай!{approval_status_msg}")
+                    await ctx.send_activity(f"🎉 Таны чөлөөний хүсэлт зөвшөөрөгдлөө!\n📅 {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног)\n✨ Сайхан амраарай!{approval_status_msg}{webhook_status_msg}")
 
                 await ADAPTER.continue_conversation(
                     requester_conversation,
@@ -1824,7 +1976,7 @@ def is_confirmation_response(text):
     
     return None
 
-def create_confirmation_message(parsed_data):
+def create_confirmation_message(parsed_data, user_email=None):
     """Баталгаажуулалтын мессеж үүсгэх"""
     message = f"""🔍 Таны чөлөөний хүсэлтээс дараах мэдээллийг олж авлаа:
 
@@ -1839,6 +1991,14 @@ def create_confirmation_message(parsed_data):
 💬 Хариулна уу:
 • **"Тийм"** эсвэл **"Зөв"** - Илгээх
 • **"Үгүй"** эсвэл **"Засна"** - Засварлах"""
+    
+    # Planner tasks мэдээлэл нэмэх
+    if user_email and PLANNER_AVAILABLE:
+        try:
+            tasks_info = get_user_planner_tasks(user_email)
+            message += f"\n\n{tasks_info}"
+        except Exception as e:
+            logger.error(f"Failed to add planner tasks to confirmation: {str(e)}")
 
     return message
 
@@ -1856,8 +2016,16 @@ async def send_approved_request_to_manager(request_data, original_message):
                     content_type="application/vnd.microsoft.card.adaptive",
                     content=approval_card
                 )
+                # Planner tasks мэдээлэл авах
+                planner_info = ""
+                if request_data.get("requester_email"):
+                    try:
+                        planner_info = f"\n\n{get_user_planner_tasks(request_data['requester_email'])}"
+                    except Exception as e:
+                        logger.error(f"Failed to get planner tasks for approved request: {str(e)}")
+                
                 message = MessageFactory.attachment(adaptive_card_attachment)
-                message.text = f"📨 Баталгаажсан чөлөөний хүсэлт: {request_data['requester_name']}\n💬 Анхны мессеж: \"{original_message}\"\n✅ Хэрэглэгч баталгаажуулсан"
+                message.text = f"📨 Баталгаажсан чөлөөний хүсэлт: {request_data['requester_name']}\n💬 Анхны мессеж: \"{original_message}\"\n✅ Хэрэглэгч баталгаажуулсан{planner_info}"
                 await ctx.send_activity(message)
             
             await ADAPTER.continue_conversation(
