@@ -946,6 +946,56 @@ def find_user_by_conversation_id(conversation_id):
             return user
     return None
 
+def save_user_absence_id(user_id, absence_id):
+    """Хэрэглэгчийн файлд absence_id хадгалах"""
+    try:
+        user_info = load_user_info(user_id)
+        if user_info:
+            user_info["current_absence_id"] = absence_id
+            user_info["absence_updated_at"] = datetime.now().isoformat()
+            
+            safe_user_id = user_id.replace(":", "_").replace("/", "_").replace("\\", "_")
+            filename = f"{CONVERSATION_DIR}/user_{safe_user_id}.json"
+            
+            with open(filename, "w", encoding="utf-8") as f:
+                json.dump(user_info, f, ensure_ascii=False, indent=2)
+            
+            logger.info(f"Saved absence_id {absence_id} for user {user_id}")
+            return True
+    except Exception as e:
+        logger.error(f"Failed to save absence_id for user {user_id}: {str(e)}")
+        return False
+
+def get_user_absence_id(user_id):
+    """Хэрэглэгчийн absence_id авах"""
+    try:
+        user_info = load_user_info(user_id)
+        if user_info:
+            return user_info.get("current_absence_id")
+    except Exception as e:
+        logger.error(f"Failed to get absence_id for user {user_id}: {str(e)}")
+    return None
+
+def clear_user_absence_id(user_id):
+    """Хэрэглэгчийн absence_id устгах"""
+    try:
+        user_info = load_user_info(user_id)
+        if user_info:
+            user_info.pop("current_absence_id", None)
+            user_info.pop("absence_updated_at", None)
+            
+            safe_user_id = user_id.replace(":", "_").replace("/", "_").replace("\\", "_")
+            filename = f"{CONVERSATION_DIR}/user_{safe_user_id}.json"
+            
+            with open(filename, "w", encoding="utf-8") as f:
+                json.dump(user_info, f, ensure_ascii=False, indent=2)
+            
+            logger.info(f"Cleared absence_id for user {user_id}")
+            return True
+    except Exception as e:
+        logger.error(f"Failed to clear absence_id for user {user_id}: {str(e)}")
+        return False
+
 @app.route("/", methods=["GET"])
 def health_check():
     pending_confirmations = len([f for f in os.listdir(PENDING_CONFIRMATIONS_DIR) if f.startswith("pending_") and not f.startswith("pending_rejection_")]) if os.path.exists(PENDING_CONFIRMATIONS_DIR) else 0
@@ -1137,8 +1187,22 @@ def process_messages():
                                     # Хүсэлт хадгалах
                                     save_leave_request(request_data)
                                     
-                                    # API дуудлага send_approved_request_to_manager функцэд хийгдэх тул энд хийх шаардлагагүй
-                                    await context.send_activity("✅ Чөлөөний хүсэлт баталгаажсан!\n📤 Менежер руу илгээгдэж байна...")
+                                    # External API руу absence request үүсгэх
+                                    api_result = await call_external_absence_api(request_data)
+                                    api_status_msg = ""
+                                    if api_result["success"]:
+                                        api_status_msg = "\n✅ Системд амжилттай бүртгэгдлээ"
+                                        # Absence ID хадгалах
+                                        if api_result.get("absence_id"):
+                                            request_data["absence_id"] = api_result["absence_id"]
+                                            save_leave_request(request_data)  # Absence ID-тай дахин хадгалах
+                                            
+                                            # Хэрэглэгчийн файлд absence_id хадгалах
+                                            save_user_absence_id(user_id, api_result["absence_id"])
+                                    else:
+                                        api_status_msg = f"\n⚠️ Системд бүртгэхэд алдаа: {api_result.get('message', 'Unknown error')}"
+                                    
+                                    await context.send_activity(f"✅ Чөлөөний хүсэлт баталгаажсан!\n📤 Менежер руу илгээгдэж байна...{api_status_msg}")
                                     
                                     # Менежер руу илгээх
                                     await send_approved_request_to_manager(request_data, user_text)
@@ -1229,20 +1293,25 @@ def process_messages():
                                 
                                 # External API руу rejection дуудлага хийх
                                 rejection_api_result = None
-                                if request_data.get("absence_id"):
+                                absence_id = request_data.get("absence_id") or get_user_absence_id(request_data["requester_user_id"])
+                                
+                                if absence_id:
                                     rejection_api_result = await call_reject_absence_api(
-                                        request_data["absence_id"], 
+                                        absence_id, 
                                         rejection_reason
                                     )
                                     if rejection_api_result["success"]:
-                                        logger.info(f"External API rejection successful for absence_id: {request_data['absence_id']}")
+                                        logger.info(f"External API rejection successful for absence_id: {absence_id}")
                                     else:
                                         logger.error(f"External API rejection failed: {rejection_api_result.get('message', 'Unknown error')}")
                                 else:
-                                    logger.warning(f"No absence_id found for request {request_data['request_id']}, skipping external rejection")
+                                    logger.warning(f"No absence_id found for request {request_data['request_id']} or user {request_data['requester_user_id']}, skipping external rejection")
                                 
                                 # Хүсэлт хадгалах
                                 save_leave_request(request_data)
+                                
+                                # Хэрэглэгчийн absence_id устгах (татгалзагдсан тул)
+                                clear_user_absence_id(request_data["requester_user_id"])
                                 
                                 # Manager-д баталгаажуулах
                                 api_status_msg = ""
