@@ -12,6 +12,7 @@ import uuid
 import openai
 from openai import OpenAI
 from config import Config
+import requests
 
 # Logging тохиргоо
 logging.basicConfig(level=logging.INFO)
@@ -111,6 +112,82 @@ def create_approval_card(request_data):
         ]
     }
     return card
+
+async def call_external_absence_api(request_data):
+    """External API руу absence request үүсгэх дуудлага хийх"""
+    try:
+        api_url = "https://mcp-server-production-6219.up.railway.app/call-function"
+        
+        # API payload бэлтгэх
+        # payload = {
+        #     "function": "create_absence_request",
+        #     "args": {
+        #         "user_email": request_data.get("requester_email"),
+        #         "start_date": request_data.get("start_date"),
+        #         "end_date": request_data.get("end_date"),
+        #         "reason": request_data.get("reason", ""),
+        #         "in_active_hours": request_data.get("inactive_hours", 8)
+        #     }
+        # }
+        
+        payload = {
+            "function": "create_absence_request",
+            "args": {
+                "user_email": "test_user10@fibo.cloud",
+                "start_date": "2025-07-30",
+                "end_date": "2025-07-31",
+                "reason": "test",
+                "in_active_hours": 8
+            }
+        }
+        
+        logger.info(f"Calling external API for absence request: {payload}")
+        
+        # HTTP POST дуудлага хийх
+        response = requests.post(
+            api_url,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            logger.info(f"External API success: {result}")
+            return {
+                "success": True,
+                "data": result,
+                "message": "Absence request created successfully"
+            }
+        else:
+            logger.error(f"External API error - Status: {response.status_code}, Response: {response.text}")
+            return {
+                "success": False,
+                "error": f"API returned status {response.status_code}",
+                "message": response.text
+            }
+            
+    except requests.exceptions.Timeout:
+        logger.error("External API timeout")
+        return {
+            "success": False,
+            "error": "API timeout",
+            "message": "External API request timed out"
+        }
+    except requests.exceptions.RequestException as e:
+        logger.error(f"External API request error: {str(e)}")
+        return {
+            "success": False,
+            "error": "Request failed",
+            "message": str(e)
+        }
+    except Exception as e:
+        logger.error(f"Unexpected error calling external API: {str(e)}")
+        return {
+            "success": False,
+            "error": "Unexpected error",
+            "message": str(e)
+        }
 
 def save_leave_request(request_data):
     """Чөлөөний хүсэлтийг хадгалах"""
@@ -419,11 +496,19 @@ async def handle_leave_request_message(context: TurnContext, text, user_id, user
         save_leave_request(request_data)
         
         # Хүсэлт гаргагчид хариулах
-        await context.send_activity(f"✅ Чөлөөний хүсэлт хүлээн авлаа!\n📅 {parsed_data['start_date']} - {parsed_data['end_date']} ({parsed_data['days']} хоног)\n💭 {parsed_data['reason']}\n⏳ Зөвшөөрөлийн хүлээлгэд байна...")
+        await context.send_activity(f"✅ Чөлөөний хүсэлт хүлээн авлаа!\n📅 {parsed_data['start_date']} - {parsed_data['end_date']} ({parsed_data['days']} хоног)\n💭 {parsed_data['reason']}\n⏳ Зөвшөөрөлийн хүлээлгэд байна...{api_status_msg}")
         
         # Bayarmunkh руу adaptive card илгээх
         approval_card = create_approval_card(request_data)
         approver_conversation = load_conversation_reference(APPROVER_USER_ID)
+        
+        # External API руу absence request үүсгэх
+        api_result = await call_external_absence_api(request_data)
+        api_status_msg = ""
+        if api_result["success"]:
+            api_status_msg = "\n✅ Системд амжилттай бүртгэгдлээ"
+        else:
+            api_status_msg = f"\n⚠️ Системд бүртгэхэд алдаа: {api_result.get('message', 'Unknown error')}"
         
         if approver_conversation:
             async def send_approval_card(ctx: TurnContext):
@@ -432,7 +517,7 @@ async def handle_leave_request_message(context: TurnContext, text, user_id, user
                     content=approval_card
                 )
                 message = MessageFactory.attachment(adaptive_card_attachment)
-                message.text = f"📩 Шинэ чөлөөний хүсэлт: {request_data['requester_name']}\n💬 Анхны мессеж: \"{text}\""
+                message.text = f"📩 Шинэ чөлөөний хүсэлт: {request_data['requester_name']}\n💬 Анхны мессеж: \"{text}\"{api_status_msg}"
                 await ctx.send_activity(message)
             
             await ADAPTER.continue_conversation(
@@ -516,6 +601,14 @@ async def forward_message_to_admin(text, user_name, user_id):
             # Хүсэлт хадгалах
             save_leave_request(request_data)
             
+            # External API руу absence request үүсгэх
+            api_result = await call_external_absence_api(request_data)
+            api_status_msg = ""
+            if api_result["success"]:
+                api_status_msg = "\n✅ Системд амжилттай бүртгэгдлээ"
+            else:
+                api_status_msg = f"\n⚠️ Системд бүртгэхэд алдаа: {api_result.get('message', 'Unknown error')}"
+            
             # Adaptive card үүсгэх
             approval_card = create_approval_card(request_data)
             
@@ -525,7 +618,7 @@ async def forward_message_to_admin(text, user_name, user_id):
                     content=approval_card
                 )
                 message = MessageFactory.attachment(adaptive_card_attachment)
-                message.text = f"📨 Шинэ мессеж: {user_name}\n💬 Анхны мессеж: \"{text}\"\n🤖 AI ойлголт: {parsed_data.get('days')} хоног, {parsed_data.get('reason')}"
+                message.text = f"📨 Шинэ мессеж: {user_name}\n💬 Анхны мессеж: \"{text}\"\n🤖 AI ойлголт: {parsed_data.get('days')} хоног, {parsed_data.get('reason')}{api_status_msg}"
                 await ctx.send_activity(message)
             
             await ADAPTER.continue_conversation(
@@ -774,6 +867,17 @@ def submit_leave_request():
         if not save_leave_request(request_data):
             return jsonify({"error": "Failed to save leave request"}), 500
 
+        # External API руу absence request үүсгэх
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        api_result = loop.run_until_complete(call_external_absence_api(request_data))
+        
+        api_status_msg = ""
+        if api_result["success"]:
+            api_status_msg = "\n✅ Системд амжилттай бүртгэгдлээ"
+        else:
+            api_status_msg = f"\n⚠️ Системд бүртгэхэд алдаа: {api_result.get('message', 'Unknown error')}"
+
         # Approval card үүсгэх
         approval_card = create_approval_card(request_data)
 
@@ -788,7 +892,7 @@ def submit_leave_request():
                 content=approval_card
             )
             message = MessageFactory.attachment(adaptive_card_attachment)
-            message.text = f"📩 Шинэ чөлөөний хүсэлт: {request_data['requester_name']}\n💬 Анхны мессеж: \"{text}\""
+            message.text = f"📩 Шинэ чөлөөний хүсэлт: {request_data['requester_name']}\n💬 REST API-аас илгээгдсэн{api_status_msg}"
             await context.send_activity(message)
 
         asyncio.run(
@@ -883,7 +987,15 @@ def process_messages():
                                     # Хүсэлт хадгалах
                                     save_leave_request(request_data)
                                     
-                                    await context.send_activity("✅ Чөлөөний хүсэлт баталгаажсан!\n📤 Менежер руу илгээгдэж байна...")
+                                    # External API руу дуудлага хийх
+                                    api_result = await call_external_absence_api(request_data)
+                                    api_status_msg = ""
+                                    if api_result["success"]:
+                                        api_status_msg = "\n✅ Системд амжилттай бүртгэгдлээ"
+                                    else:
+                                        api_status_msg = f"\n⚠️ Системд бүртгэхэд алдаа: {api_result.get('message', 'Unknown error')}"
+                                    
+                                    await context.send_activity(f"✅ Чөлөөний хүсэлт баталгаажсан!\n📤 Менежер руу илгээгдэж байна...{api_status_msg}")
                                     
                                     # Менежер руу илгээх
                                     await send_approved_request_to_manager(request_data, user_text)
@@ -1103,7 +1215,7 @@ async def handle_adaptive_card_action(context: TurnContext, action_data):
             requester_conversation = load_conversation_reference(request_data["requester_user_id"])
             if requester_conversation:
                 async def notify_approval(ctx: TurnContext):
-                    await ctx.send_activity(f"🎉 Таны чөлөөний хүсэлт зөвшөөрөгдлөө!\n📅 {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног)\n✨ Сайхан амралтаа!")
+                    await ctx.send_activity(f"🎉 Таны чөлөөний хүсэлт зөвшөөрөгдлөө!\n📅 {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног)\n✨ Сайхан амраарай!")
 
                 await ADAPTER.continue_conversation(
                     requester_conversation,
@@ -1132,14 +1244,14 @@ async def handle_adaptive_card_action(context: TurnContext, action_data):
             requester_conversation = load_conversation_reference(request_data["requester_user_id"])
             if requester_conversation:
                 async def notify_rejection(ctx: TurnContext):
-                    await ctx.send_activity(f"❌ Таны чөлөөний хүсэлт татгалзагдлаа\n📅 {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног)\n💬 Нэмэлт мэдээллийн хэрэгтэй бол удирдлагатайгаа ярилцана уу.")
+                    await ctx.send_activity(f"❌ Таны чөлөөний хүсэлт татгалзагдлаа\n📅 {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног)\n💬 Нэмэлт мэдээлэл хэрэгтэй бол удирдлагатайгаа ярилцана уу.")
 
                 await ADAPTER.continue_conversation(
                     requester_conversation,
                     notify_rejection,
                     app_id
                 )
-
+            
         logger.info(f"Leave request {request_id} {action}d by {context.activity.from_property.id}")
         
     except Exception as e:
@@ -1415,6 +1527,14 @@ async def send_approved_request_to_manager(request_data, original_message):
         approver_conversation = load_conversation_reference(APPROVER_USER_ID)
         
         if approver_conversation:
+            # External API руу absence request үүсгэх
+            api_result = await call_external_absence_api(request_data)
+            api_status_msg = ""
+            if api_result["success"]:
+                api_status_msg = "\n✅ Системд амжилттай бүртгэгдлээ"
+            else:
+                api_status_msg = f"\n⚠️ Системд бүртгэхэд алдаа: {api_result.get('message', 'Unknown error')}"
+            
             # Adaptive card үүсгэх
             approval_card = create_approval_card(request_data)
             
@@ -1424,7 +1544,7 @@ async def send_approved_request_to_manager(request_data, original_message):
                     content=approval_card
                 )
                 message = MessageFactory.attachment(adaptive_card_attachment)
-                message.text = f"📨 Баталгаажсан чөлөөний хүсэлт: {request_data['requester_name']}\n💬 Анхны мессеж: \"{original_message}\"\n✅ Хэрэглэгч баталгаажуулсан"
+                message.text = f"📨 Баталгаажсан чөлөөний хүсэлт: {request_data['requester_name']}\n💬 Анхны мессеж: \"{original_message}\"\n✅ Хэрэглэгч баталгаажуулсан{api_status_msg}"
                 await ctx.send_activity(message)
             
             await ADAPTER.continue_conversation(
