@@ -154,9 +154,16 @@ async def call_external_absence_api(request_data):
         if response.status_code == 200:
             result = response.json()
             logger.info(f"External API success: {result}")
+            
+            # Response-аас absence_id авах оролдлого
+            absence_id = None
+            if isinstance(result, dict):
+                absence_id = result.get("absence_id") or result.get("id") or result.get("data", {}).get("id")
+            
             return {
                 "success": True,
                 "data": result,
+                "absence_id": absence_id,
                 "message": "Absence request created successfully"
             }
         else:
@@ -183,6 +190,130 @@ async def call_external_absence_api(request_data):
         }
     except Exception as e:
         logger.error(f"Unexpected error calling external API: {str(e)}")
+        return {
+            "success": False,
+            "error": "Unexpected error",
+            "message": str(e)
+        }
+
+async def call_approve_absence_api(absence_id, comment="Зөвшөөрсөн"):
+    """External API руу absence approve дуудлага хийх"""
+    try:
+        api_url = "https://mcp-server-production-6219.up.railway.app/call-function"
+        
+        # API payload бэлтгэх
+        payload = {
+            "function": "approve_absence",
+            "args": {
+                "absence_id": absence_id,
+                "comment": comment
+            }
+        }
+        
+        logger.info(f"Calling external API for absence approval: {payload}")
+        
+        # HTTP POST дуудлага хийх
+        response = requests.post(
+            api_url,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            logger.info(f"External API approval success: {result}")
+            return {
+                "success": True,
+                "data": result,
+                "message": "Absence approved successfully"
+            }
+        else:
+            logger.error(f"External API approval error - Status: {response.status_code}, Response: {response.text}")
+            return {
+                "success": False,
+                "error": f"API returned status {response.status_code}",
+                "message": response.text
+            }
+            
+    except requests.exceptions.Timeout:
+        logger.error("External API approval timeout")
+        return {
+            "success": False,
+            "error": "API timeout",
+            "message": "External API request timed out"
+        }
+    except requests.exceptions.RequestException as e:
+        logger.error(f"External API approval request error: {str(e)}")
+        return {
+            "success": False,
+            "error": "Request failed",
+            "message": str(e)
+        }
+    except Exception as e:
+        logger.error(f"Unexpected error calling external approval API: {str(e)}")
+        return {
+            "success": False,
+            "error": "Unexpected error",
+            "message": str(e)
+        }
+
+async def call_reject_absence_api(absence_id, comment=""):
+    """External API руу absence reject дуудлага хийх"""
+    try:
+        api_url = "https://mcp-server-production-6219.up.railway.app/call-function"
+        
+        # API payload бэлтгэх
+        payload = {
+            "function": "reject_absence",
+            "args": {
+                "absence_id": absence_id,
+                "comment": comment
+            }
+        }
+        
+        logger.info(f"Calling external API for absence rejection: {payload}")
+        
+        # HTTP POST дуудлага хийх
+        response = requests.post(
+            api_url,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            logger.info(f"External API rejection success: {result}")
+            return {
+                "success": True,
+                "data": result,
+                "message": "Absence rejected successfully"
+            }
+        else:
+            logger.error(f"External API rejection error - Status: {response.status_code}, Response: {response.text}")
+            return {
+                "success": False,
+                "error": f"API returned status {response.status_code}",
+                "message": response.text
+            }
+            
+    except requests.exceptions.Timeout:
+        logger.error("External API rejection timeout")
+        return {
+            "success": False,
+            "error": "API timeout",
+            "message": "External API request timed out"
+        }
+    except requests.exceptions.RequestException as e:
+        logger.error(f"External API rejection request error: {str(e)}")
+        return {
+            "success": False,
+            "error": "Request failed",
+            "message": str(e)
+        }
+    except Exception as e:
+        logger.error(f"Unexpected error calling external rejection API: {str(e)}")
         return {
             "success": False,
             "error": "Unexpected error",
@@ -507,6 +638,10 @@ async def handle_leave_request_message(context: TurnContext, text, user_id, user
         api_status_msg = ""
         if api_result["success"]:
             api_status_msg = "\n✅ Системд амжилттай бүртгэгдлээ"
+            # Absence ID хадгалах
+            if api_result.get("absence_id"):
+                request_data["absence_id"] = api_result["absence_id"]
+                save_leave_request(request_data)  # Absence ID-тай дахин хадгалах
         else:
             api_status_msg = f"\n⚠️ Системд бүртгэхэд алдаа: {api_result.get('message', 'Unknown error')}"
         
@@ -606,6 +741,10 @@ async def forward_message_to_admin(text, user_name, user_id):
             api_status_msg = ""
             if api_result["success"]:
                 api_status_msg = "\n✅ Системд амжилттай бүртгэгдлээ"
+                # Absence ID хадгалах
+                if api_result.get("absence_id"):
+                    request_data["absence_id"] = api_result["absence_id"]
+                    save_leave_request(request_data)  # Absence ID-тай дахин хадгалах
             else:
                 api_status_msg = f"\n⚠️ Системд бүртгэхэд алдаа: {api_result.get('message', 'Unknown error')}"
             
@@ -804,7 +943,8 @@ def find_user_by_conversation_id(conversation_id):
 
 @app.route("/", methods=["GET"])
 def health_check():
-    pending_confirmations = len([f for f in os.listdir(PENDING_CONFIRMATIONS_DIR) if f.startswith("pending_")]) if os.path.exists(PENDING_CONFIRMATIONS_DIR) else 0
+    pending_confirmations = len([f for f in os.listdir(PENDING_CONFIRMATIONS_DIR) if f.startswith("pending_") and not f.startswith("pending_rejection_")]) if os.path.exists(PENDING_CONFIRMATIONS_DIR) else 0
+    pending_rejections = len([f for f in os.listdir(PENDING_CONFIRMATIONS_DIR) if f.startswith("pending_rejection_")]) if os.path.exists(PENDING_CONFIRMATIONS_DIR) else 0
     
     return jsonify({
         "status": "running",
@@ -812,7 +952,8 @@ def health_check():
         "endpoints": ["/api/messages", "/proactive-message", "/users", "/broadcast", "/leave-request", "/approval-callback", "/send-by-conversation"],
         "app_id_configured": bool(os.getenv("MICROSOFT_APP_ID")),
         "stored_users": len(list_all_users()),
-        "pending_confirmations": pending_confirmations
+        "pending_confirmations": pending_confirmations,
+        "pending_rejections": pending_rejections
     })
 
 @app.route("/users", methods=["GET"])
@@ -875,6 +1016,10 @@ def submit_leave_request():
         api_status_msg = ""
         if api_result["success"]:
             api_status_msg = "\n✅ Системд амжилттай бүртгэгдлээ"
+            # Absence ID хадгалах
+            if api_result.get("absence_id"):
+                request_data["absence_id"] = api_result["absence_id"]
+                save_leave_request(request_data)  # Absence ID-тай дахин хадгалах
         else:
             api_status_msg = f"\n⚠️ Системд бүртгэхэд алдаа: {api_result.get('message', 'Unknown error')}"
 
@@ -992,6 +1137,10 @@ def process_messages():
                                     api_status_msg = ""
                                     if api_result["success"]:
                                         api_status_msg = "\n✅ Системд амжилттай бүртгэгдлээ"
+                                        # Absence ID хадгалах
+                                        if api_result.get("absence_id"):
+                                            request_data["absence_id"] = api_result["absence_id"]
+                                            save_leave_request(request_data)  # Absence ID-тай дахин хадгалах
                                     else:
                                         api_status_msg = f"\n⚠️ Системд бүртгэхэд алдаа: {api_result.get('message', 'Unknown error')}"
                                     
@@ -1199,6 +1348,20 @@ async def handle_adaptive_card_action(context: TurnContext, action_data):
             request_data["approved_at"] = datetime.now().isoformat()
             request_data["approved_by"] = context.activity.from_property.id
             
+            # External API руу approval дуудлага хийх
+            approval_api_result = None
+            if request_data.get("absence_id"):
+                approval_api_result = await call_approve_absence_api(
+                    request_data["absence_id"], 
+                    "Зөвшөөрсөн"
+                )
+                if approval_api_result["success"]:
+                    logger.info(f"External API approval successful for absence_id: {request_data['absence_id']}")
+                else:
+                    logger.error(f"External API approval failed: {approval_api_result.get('message', 'Unknown error')}")
+            else:
+                logger.warning(f"No absence_id found for request {request_id}, skipping external approval")
+            
             # Хүсэлт хадгалах
             save_leave_request(request_data)
             
@@ -1215,7 +1378,14 @@ async def handle_adaptive_card_action(context: TurnContext, action_data):
             requester_conversation = load_conversation_reference(request_data["requester_user_id"])
             if requester_conversation:
                 async def notify_approval(ctx: TurnContext):
-                    await ctx.send_activity(f"🎉 Таны чөлөөний хүсэлт зөвшөөрөгдлөө!\n📅 {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног)\n✨ Сайхан амраарай!")
+                    approval_status_msg = ""
+                    if approval_api_result:
+                        if approval_api_result["success"]:
+                            approval_status_msg = "\n✅ PMT дээр орлоо."
+                        else:
+                            approval_status_msg = f"\n⚠️ Системд зөвшөөрөхэд алдаа: {approval_api_result.get('message', 'Unknown error')}"
+                    
+                    await ctx.send_activity(f"🎉 Таны чөлөөний хүсэлт зөвшөөрөгдлөө!\n📅 {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног)\n✨ Сайхан амраарай!{approval_status_msg}")
 
                 await ADAPTER.continue_conversation(
                     requester_conversation,
@@ -1224,33 +1394,12 @@ async def handle_adaptive_card_action(context: TurnContext, action_data):
                 )
             
         elif action == "reject":
-            request_data["status"] = "rejected"
-            request_data["rejected_at"] = datetime.now().isoformat()
-            request_data["rejected_by"] = context.activity.from_property.id
+            # Manager-ээс татгалзах шалтгаан асуух
+            manager_user_id = context.activity.from_property.id
+            save_pending_rejection(manager_user_id, request_data)
             
-            # Хүсэлт хадгалах
-            save_leave_request(request_data)
-            
-            # Disabled card илгээх
-            disabled_card = create_disabled_card("reject")
-            adaptive_card_attachment = Attachment(
-                content_type="application/vnd.microsoft.card.adaptive",
-                content=disabled_card
-            )
-            disabled_message = MessageFactory.attachment(adaptive_card_attachment)
-            await context.send_activity(disabled_message)
-            
-            # Хүсэлт гаргагч руу мэдэгдэх
-            requester_conversation = load_conversation_reference(request_data["requester_user_id"])
-            if requester_conversation:
-                async def notify_rejection(ctx: TurnContext):
-                    await ctx.send_activity(f"❌ Таны чөлөөний хүсэлт татгалзагдлаа\n📅 {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног)\n💬 Нэмэлт мэдээлэл хэрэгтэй бол удирдлагатайгаа ярилцана уу.")
-
-                await ADAPTER.continue_conversation(
-                    requester_conversation,
-                    notify_rejection,
-                    app_id
-                )
+            # Manager-д шалтгаан асуух
+            await context.send_activity(f"❓ Татгалзах шалтгааныг бичнэ үү:\n\n📝 Хүсэлт: {request_data['requester_name']} - {request_data['start_date']} ({request_data['days']} хоног)\n💭 Шалтгаан: {request_data['reason']}\n\n✍️ Татгалзах шалтгааныг дараагийн мессежээр илгээнэ үү...")
             
         logger.info(f"Leave request {request_id} {action}d by {context.activity.from_property.id}")
         
@@ -1477,6 +1626,57 @@ def delete_pending_confirmation(user_id):
         logger.error(f"Failed to delete pending confirmation: {str(e)}")
         return False
 
+def save_pending_rejection(manager_user_id, request_data):
+    """Manager-н татгалзах шалтгааныг хүлээж буй мэдээллийг хадгалах"""
+    try:
+        safe_user_id = manager_user_id.replace(":", "_").replace("/", "_").replace("\\", "_")
+        filename = f"{PENDING_CONFIRMATIONS_DIR}/pending_rejection_{safe_user_id}.json"
+        
+        rejection_data = {
+            "manager_user_id": manager_user_id,
+            "request_data": request_data,
+            "created_at": datetime.now().isoformat(),
+            "status": "awaiting_rejection_reason"
+        }
+        
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(rejection_data, f, ensure_ascii=False, indent=2)
+        
+        logger.info(f"Saved pending rejection for manager {manager_user_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to save pending rejection: {str(e)}")
+        return False
+
+def load_pending_rejection(manager_user_id):
+    """Manager-н татгалзах шалтгааныг хүлээж буй мэдээллийг унших"""
+    try:
+        safe_user_id = manager_user_id.replace(":", "_").replace("/", "_").replace("\\", "_")
+        filename = f"{PENDING_CONFIRMATIONS_DIR}/pending_rejection_{safe_user_id}.json"
+        
+        if not os.path.exists(filename):
+            return None
+        
+        with open(filename, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Failed to load pending rejection for manager {manager_user_id}: {str(e)}")
+        return None
+
+def delete_pending_rejection(manager_user_id):
+    """Manager-н татгалзах шалтгааныг хүлээж буй мэдээллийг устгах"""
+    try:
+        safe_user_id = manager_user_id.replace(":", "_").replace("/", "_").replace("\\", "_")
+        filename = f"{PENDING_CONFIRMATIONS_DIR}/pending_rejection_{safe_user_id}.json"
+        
+        if os.path.exists(filename):
+            os.remove(filename)
+            logger.info(f"Deleted pending rejection for manager {manager_user_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to delete pending rejection: {str(e)}")
+        return False
+
 def is_confirmation_response(text):
     """Мессеж нь баталгаажуулалтын хариу эсэхийг шалгах"""
     text_lower = text.lower().strip()
@@ -1532,6 +1732,10 @@ async def send_approved_request_to_manager(request_data, original_message):
             api_status_msg = ""
             if api_result["success"]:
                 api_status_msg = "\n✅ Системд амжилттай бүртгэгдлээ"
+                # Absence ID хадгалах
+                if api_result.get("absence_id"):
+                    request_data["absence_id"] = api_result["absence_id"]
+                    save_leave_request(request_data)  # Absence ID-тай дахин хадгалах
             else:
                 api_status_msg = f"\n⚠️ Системд бүртгэхэд алдаа: {api_result.get('message', 'Unknown error')}"
             
