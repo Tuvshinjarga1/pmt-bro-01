@@ -388,15 +388,15 @@ async def call_reject_absence_api(absence_id, comment=""):
             "error": "Unexpected error",
             "message": str(e)
         }
-
+    
 async def send_teams_webhook_notification(requester_name):
     """Teams webhook руу зөвшөөрөлийн мэдэгдэл илгээх"""
     try:
-        webhook_url = "https://fibocloudmn.webhook.office.com/webhookb2/661d5c20-ce88-4fc4-ae3f-843ba7b1fecc@3fee1c11-7cdf-44b4-a1b0-5183408e1d89/IncomingWebhook/d835790d3e7844bc8ef8059060ecdd4d/e66e1c65-f5db-4a87-95e1-9dbebc412afe/V2yaMpY1jDY7oxwlTb2D9BMg9M4wCYqKcLWEyQ6h8Q8p81"
+        webhook_url = "https://prod-36.southeastasia.logic.azure.com:443/workflows/6dcb3cbe39124404a12b754720b25699/triggers/manual/paths/invoke?api-version=2016-06-01&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=nhqRPaYSLixFlWOePwBHVlyWrbAv6OL7h0SNclMZS0U"
         
         # Teams webhook payload бэлтгэх
         payload = {
-            "text": f"{requester_name} чөлөө авсан шүү, манайхаан."
+            "message": f"{requester_name} чөлөө авсан шүү, манайхаан."
         }
         
         logger.info(f"Sending Teams webhook notification for {requester_name}")
@@ -2034,7 +2034,7 @@ async def send_approved_request_to_manager(request_data, original_message):
                 app_id
             )
             logger.info(f"Approved leave request {request_data['request_id']} sent to manager")
-        else:
+        else: 
             logger.warning(f"Manager conversation reference not found for request {request_data['request_id']}")
     except Exception as e:
         logger.error(f"Error sending approved request to manager: {str(e)}")
