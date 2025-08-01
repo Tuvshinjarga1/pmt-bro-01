@@ -13,6 +13,10 @@ import openai
 from openai import OpenAI
 from config import Config
 import requests
+import threading
+import time
+from typing import Dict, List, Optional
+from urllib.parse import quote
 
 # Microsoft Planner tasks авах
 try:
@@ -55,6 +59,422 @@ for directory in [CONVERSATION_DIR, LEAVE_REQUESTS_DIR, PENDING_CONFIRMATIONS_DI
 APPROVER_EMAIL = "bayarmunkh@fibo.cloud"
 APPROVER_USER_ID = "29:1kIuFRh3SgMXCUqtZSJBjHDaDmVF7l2-zXmi3qZNRBokdrt8QxiwyVPutdFsMKMp1R-tF52PqrhmqHegty9X2JA"
 
+# Timeout механизм - 30 минут = 1800 секунд
+CONFIRMATION_TIMEOUT_SECONDS = 30 * 60  # 30 минут
+active_timers = {}  # user_id -> Timer object
+
+# Manager хариу өгөх timeout - 2 цаг = 7200 секунд
+MANAGER_RESPONSE_TIMEOUT_SECONDS = 2 * 60 * 60  # 2 цаг
+manager_pending_actions = {}  # request_id -> Timer object
+
+# Microsoft Graph API Configuration
+TENANT_ID = os.getenv("TENANT_ID")
+CLIENT_ID = os.getenv("CLIENT_ID")
+CLIENT_SECRET = os.getenv("CLIENT_SECRET")
+
+_cached_graph_token = None
+_graph_token_expiry = 0  # UNIX timestamp
+
+def get_graph_access_token() -> str:
+    """Microsoft Graph API-ын access token авах"""
+    global _cached_graph_token, _graph_token_expiry
+
+    # Хэрвээ token хүчинтэй байвал cache-аас буцаана
+    if _cached_graph_token and time.time() < _graph_token_expiry - 10:
+        return _cached_graph_token
+
+    url = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
+    headers = { "Content-Type": "application/x-www-form-urlencoded" }
+    data = {
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "scope": "https://graph.microsoft.com/.default",
+        "grant_type": "client_credentials"
+    }
+
+    try:
+        response = requests.post(url, headers=headers, data=data)
+        if response.status_code != 200:
+            logger.error(f"Microsoft Graph access token авахад алдаа: {response.status_code} - {response.text}")
+            raise Exception("Microsoft Graph access token авахад амжилтгүй боллоо")
+
+        token_data = response.json()
+        _cached_graph_token = token_data["access_token"]
+        _graph_token_expiry = time.time() + token_data.get("expires_in", 3600)
+
+        logger.info("Microsoft Graph access token амжилттай авлаа")
+        return _cached_graph_token
+    except Exception as e:
+        logger.error(f"Microsoft Graph access token авахад алдаа: {str(e)}")
+        return None
+
+class MicrosoftUsersAPI:
+    """Microsoft Graph API ашиглан хэрэглэгчдийг удирдах класс"""
+    
+    def __init__(self, access_token: str):
+        self.base_url = "https://graph.microsoft.com/v1.0"
+        self.headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        }
+
+    def search_users_by_job_title(self, job_title: str) -> List[Dict]:
+        """Албан тушаалаар хэрэглэгч хайх"""
+        try:
+            encoded_job_title = quote(job_title)
+            url = f"{self.base_url}/users?$select=id,displayName,mail,jobTitle,department,accountEnabled&$filter=jobTitle eq '{encoded_job_title}'"
+            
+            response = requests.get(url, headers=self.headers)
+            
+            if response.status_code != 200:
+                logger.error(f"Microsoft Graph API хэрэглэгч хайхад алдаа: {response.status_code} - {response.text}")
+                return []
+            
+            users = response.json().get("value", [])
+            # Зөвхөн идэвхтэй хэрэглэгчдийг буцаах
+            active_users = [user for user in users if user.get('accountEnabled', True)]
+            
+            logger.info(f"'{job_title}' албан тушаалтай {len(active_users)} идэвхтэй хэрэглэгч олдлоо")
+            return active_users
+            
+        except Exception as e:
+            logger.error(f"Microsoft Graph API хэрэглэгч хайхад алдаа: {str(e)}")
+            return []
+
+    def get_user_by_email(self, email: str) -> Optional[Dict]:
+        """И-мэйлээр хэрэглэгч олох"""
+        try:
+            encoded_email = quote(email)
+            url = f"{self.base_url}/users/{encoded_email}?$select=id,displayName,mail,jobTitle,department,accountEnabled"
+            
+            response = requests.get(url, headers=self.headers)
+            
+            if response.status_code != 200:
+                logger.error(f"Microsoft Graph API и-мэйлээр хэрэглэгч олоход алдаа: {response.status_code} - {response.text}")
+                return None
+            
+            return response.json()
+        except Exception as e:
+            logger.error(f"Microsoft Graph API и-мэйлээр хэрэглэгч олоход алдаа: {str(e)}")
+            return None
+
+    def assign_sponsor_to_user(self, user_id: str, sponsor_id: str) -> bool:
+        """Guest user-д sponsor (орлон ажиллах хүн) томилох"""
+        try:
+            # Эхлээд одоогийн sponsor-уудыг шалгах
+            existing_sponsors = self.get_user_sponsors(user_id)
+            
+            # Sponsor аль хэдийн байгаа эсэхийг шалгах
+            for sponsor in existing_sponsors:
+                if sponsor.get('id') == sponsor_id:
+                    logger.info(f"Sponsor аль хэдийн томилогдсон байна: {sponsor.get('displayName')}")
+                    return True  # Аль хэдийн томилогдсон байгаа тул success гэж тооцно
+            
+            url = f"{self.base_url}/users/{user_id}/sponsors/$ref"
+            
+            data = {
+                "@odata.id": f"https://graph.microsoft.com/v1.0/users/{sponsor_id}"
+            }
+            
+            response = requests.post(url, headers=self.headers, json=data)
+            
+            if response.status_code in [200, 204]:
+                logger.info(f"Sponsor амжилттай томилогдлоо: {user_id} -> {sponsor_id}")
+                return True
+            elif response.status_code == 400 and "already exist" in response.text:
+                logger.info(f"Sponsor аль хэдийн томилогдсон байна: {user_id} -> {sponsor_id}")
+                return True  # Аль хэдийн томилогдсон байгаа тул success гэж тооцно
+            else:
+                logger.error(f"Sponsor томилоход алдаа: {response.status_code} - {response.text}")
+                return False
+        except Exception as e:
+            logger.error(f"Sponsor томилоход алдаа: {str(e)}")
+            return False
+
+    def get_user_sponsors(self, user_id: str) -> List[Dict]:
+        """Хэрэглэгчийн sponsor-уудыг авах"""
+        try:
+            url = f"{self.base_url}/users/{user_id}/sponsors"
+            
+            response = requests.get(url, headers=self.headers)
+            
+            if response.status_code != 200:
+                logger.error(f"Sponsor мэдээлэл авахад алдаа: {response.status_code} - {response.text}")
+                return []
+            
+            return response.json().get("value", [])
+        except Exception as e:
+            logger.error(f"Sponsor мэдээлэл авахад алдаа: {str(e)}")
+            return []
+
+    def remove_sponsor_from_user(self, user_id: str, sponsor_id: str) -> bool:
+        """Хэрэглэгчээс sponsor хасах"""
+        try:
+            url = f"{self.base_url}/users/{user_id}/sponsors/{sponsor_id}/$ref"
+            
+            response = requests.delete(url, headers=self.headers)
+            
+            if response.status_code in [200, 204]:
+                logger.info(f"Sponsor амжилттай хасагдлаа: {user_id} -> {sponsor_id}")
+                return True
+            else:
+                logger.error(f"Sponsor хасахад алдаа: {response.status_code} - {response.text}")
+                return False
+        except Exception as e:
+            logger.error(f"Sponsor хасахад алдаа: {str(e)}")
+            return False
+
+def assign_replacement_worker(requester_email: str, replacement_email: str) -> Dict:
+    """Чөлөө авсан хүнд орлон ажиллах хүн томилох"""
+    try:
+        access_token = get_graph_access_token()
+        if not access_token:
+            return {"success": False, "message": "Microsoft Graph access token авч чадсангүй"}
+        
+        users_api = MicrosoftUsersAPI(access_token)
+        
+        # Чөлөө авсан хүнийг олох
+        requester = users_api.get_user_by_email(requester_email)
+        if not requester:
+            return {"success": False, "message": f"Чөлөө авсан хүн олдсонгүй: {requester_email}"}
+        
+        # Орлон ажиллах хүнийг олох
+        replacement = users_api.get_user_by_email(replacement_email)
+        if not replacement:
+            return {"success": False, "message": f"Орлон ажиллах хүн олдсонгүй: {replacement_email}"}
+        
+        # Sponsor томилох
+        success = users_api.assign_sponsor_to_user(requester.get('id'), replacement.get('id'))
+        
+        if success:
+            logger.info(f"Орлон ажиллах хүн томилогдлоо: {requester_email} -> {replacement_email}")
+            return {
+                "success": True,
+                "message": "Орлон ажиллах хүн амжилттай томилогдлоо",
+                "requester": {
+                    "id": requester.get('id'),
+                    "name": requester.get('displayName'),
+                    "email": requester.get('mail')
+                },
+                "replacement": {
+                    "id": replacement.get('id'),
+                    "name": replacement.get('displayName'),
+                    "email": replacement.get('mail')
+                }
+            }
+        else:
+            return {"success": False, "message": "Sponsor томилоход алдаа гарлаа"}
+            
+    except Exception as e:
+        logger.error(f"Орлон ажиллах хүн томилоход алдаа: {str(e)}")
+        return {"success": False, "message": str(e)}
+
+def remove_replacement_worker(requester_email: str, replacement_email: str) -> Dict:
+    """Чөлөө авсан хүнээс орлон ажиллах хүнийг хасах"""
+    try:
+        access_token = get_graph_access_token()
+        if not access_token:
+            return {"success": False, "message": "Microsoft Graph access token авч чадсангүй"}
+        
+        users_api = MicrosoftUsersAPI(access_token)
+        
+        # Чөлөө авсан хүнийг олох
+        requester = users_api.get_user_by_email(requester_email)
+        if not requester:
+            return {"success": False, "message": f"Чөлөө авсан хүн олдсонгүй: {requester_email}"}
+        
+        # Орлон ажиллах хүнийг олох
+        replacement = users_api.get_user_by_email(replacement_email)
+        if not replacement:
+            return {"success": False, "message": f"Орлон ажиллах хүн олдсонгүй: {replacement_email}"}
+        
+        # Sponsor хасах
+        success = users_api.remove_sponsor_from_user(requester.get('id'), replacement.get('id'))
+        
+        if success:
+            logger.info(f"Орлон ажиллах хүн хасагдлаа: {requester_email} -> {replacement_email}")
+            return {
+                "success": True,
+                "message": "Орлон ажиллах хүн амжилттай хасагдлаа",
+                "requester": {
+                    "id": requester.get('id'),
+                    "name": requester.get('displayName'),
+                    "email": requester.get('mail')
+                },
+                "replacement": {
+                    "id": replacement.get('id'),
+                    "name": replacement.get('displayName'),
+                    "email": replacement.get('mail')
+                }
+            }
+        else:
+            return {"success": False, "message": "Sponsor хасахад алдаа гарлаа"}
+            
+    except Exception as e:
+        logger.error(f"Орлон ажиллах хүн хасахад алдаа: {str(e)}")
+        return {"success": False, "message": str(e)}
+
+def get_replacement_workers(requester_email: str) -> Dict:
+    """Чөлөө авсан хүний орлон ажиллах хүмүүсийг авах"""
+    try:
+        access_token = get_graph_access_token()
+        if not access_token:
+            return {"success": False, "message": "Microsoft Graph access token авч чадсангүй"}
+        
+        users_api = MicrosoftUsersAPI(access_token)
+        
+        # Чөлөө авсан хүнийг олох
+        requester = users_api.get_user_by_email(requester_email)
+        if not requester:
+            return {"success": False, "message": f"Чөлөө авсан хүн олдсонгүй: {requester_email}"}
+        
+        # Sponsor-уудыг авах
+        sponsors = users_api.get_user_sponsors(requester.get('id'))
+        
+        replacement_workers = []
+        for sponsor in sponsors:
+            replacement_workers.append({
+                "id": sponsor.get('id'),
+                "name": sponsor.get('displayName'),
+                "email": sponsor.get('mail'),
+                "jobTitle": sponsor.get('jobTitle')
+            })
+        
+        return {
+            "success": True,
+            "requester": {
+                "id": requester.get('id'),
+                "name": requester.get('displayName'),
+                "email": requester.get('mail')
+            },
+            "replacement_workers": replacement_workers,
+            "count": len(replacement_workers)
+        }
+        
+    except Exception as e:
+        logger.error(f"Орлон ажиллах хүмүүсийг авахад алдаа: {str(e)}")
+        return {"success": False, "message": str(e)}
+
+def auto_remove_replacement_workers_on_leave_end(requester_email: str) -> Dict:
+    """Чөлөө дуусахад орлон ажиллах хүмүүсийг автоматаар хасах"""
+    try:
+        # Орлон ажиллах хүмүүсийг авах
+        result = get_replacement_workers(requester_email)
+        if not result["success"]:
+            return result
+        
+        replacement_workers = result["replacement_workers"]
+        if not replacement_workers:
+            return {"success": True, "message": "Хасах орлон ажиллах хүн байхгүй", "removed_count": 0}
+        
+        removed_count = 0
+        errors = []
+        
+        # Бүх орлон ажиллах хүмүүсийг хасах
+        for replacement in replacement_workers:
+            remove_result = remove_replacement_worker(requester_email, replacement["email"])
+            if remove_result["success"]:
+                removed_count += 1
+                logger.info(f"Автомат хасагдлаа: {replacement['name']} ({replacement['email']})")
+            else:
+                errors.append(f"{replacement['name']}: {remove_result['message']}")
+        
+        return {
+            "success": True,
+            "message": f"{removed_count} орлон ажиллах хүн автоматаар хасагдлаа",
+            "removed_count": removed_count,
+            "total_count": len(replacement_workers),
+            "errors": errors
+        }
+        
+    except Exception as e:
+        logger.error(f"Автомат орлон ажиллах хүн хасахад алдаа: {str(e)}")
+        return {"success": False, "message": str(e)}
+
+def check_and_cleanup_expired_leaves():
+    """Дууссан чөлөөний орлон ажиллах хүмүүсийг автоматаар цэвэрлэх"""
+    try:
+        from datetime import datetime
+        import os
+        import glob
+        
+        current_date = datetime.now().date()
+        cleanup_results = []
+        
+        # Хадгалагдсан бүх leave request файлуудыг шалгах
+        if os.path.exists(LEAVE_REQUESTS_DIR):
+            for file_path in glob.glob(f"{LEAVE_REQUESTS_DIR}/request_*.json"):
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        request_data = json.load(f)
+                    
+                    end_date_str = request_data.get('end_date')
+                    requester_email = request_data.get('requester_email')
+                    request_status = request_data.get('status')
+                    
+                    if not end_date_str or not requester_email or request_status != 'approved':
+                        continue
+                    
+                    # End date-г parse хийх
+                    try:
+                        end_date = datetime.strptime(end_date_str, '%Y-%m-%d').date()
+                    except ValueError:
+                        continue
+                    
+                    # Чөлөө дууссан эсэхийг шалгах
+                    if end_date < current_date:
+                        logger.info(f"Дууссан чөлөө олдлоо: {requester_email} ({end_date})")
+                        
+                        # Орлон ажиллах хүмүүсийг автомат хасах
+                        result = auto_remove_replacement_workers_on_leave_end(requester_email)
+                        cleanup_results.append({
+                            "requester_email": requester_email,
+                            "end_date": end_date_str,
+                            "result": result
+                        })
+                        
+                        # Leave request-н статусыг 'completed' болгох
+                        request_data['status'] = 'completed'
+                        request_data['completed_at'] = datetime.now().isoformat()
+                        request_data['auto_cleanup'] = True
+                        
+                        with open(file_path, 'w', encoding='utf-8') as f:
+                            json.dump(request_data, f, ensure_ascii=False, indent=2)
+                        
+                        logger.info(f"Leave request completed: {requester_email}")
+                
+                except Exception as e:
+                    logger.error(f"Leave request файл боловсруулахад алдаа {file_path}: {str(e)}")
+                    continue
+        
+        logger.info(f"Expired leaves cleanup completed: {len(cleanup_results)} processed")
+        return {
+            "success": True,
+            "message": f"{len(cleanup_results)} дууссан чөлөө боловсруулагдлаа",
+            "processed_count": len(cleanup_results),
+            "results": cleanup_results
+        }
+        
+    except Exception as e:
+        logger.error(f"Expired leaves cleanup-д алдаа: {str(e)}")
+        return {"success": False, "message": str(e)}
+
+def get_hr_managers() -> List[Dict]:
+    """HR Manager-уудын жагсаалтыг авах"""
+    try:
+        access_token = get_graph_access_token()
+        if not access_token:
+            logger.error("Microsoft Graph access token авч чадсангүй")
+            return []
+        
+        users_api = MicrosoftUsersAPI(access_token)
+        hr_managers = users_api.search_users_by_job_title("Human Resource Manager")
+        
+        return hr_managers
+    except Exception as e:
+        logger.error(f"HR Manager-уудыг олоход алдаа: {str(e)}")
+        return []
+
 def create_approval_card(request_data):
     """Approval-ын тулд adaptive card үүсгэх"""
     card = {
@@ -96,6 +516,19 @@ def create_approval_card(request_data):
                         "value": request_data.get("reason", "Тодорхойгүй")
                     }
                 ]
+            },
+            {
+                "type": "TextBlock",
+                "text": "🔄 **Орлон ажиллах хүн томилох (сонголттой):**",
+                "wrap": True,
+                "weight": "bolder",
+                "spacing": "medium"
+            },
+            {
+                "type": "Input.Text",
+                "id": "replacement_email",
+                "placeholder": "example@fibo.cloud - Орлон ажиллах хүний и-мэйл (заавал биш)",
+                "isRequired": False
             }
         ],
         "actions": [
@@ -1137,14 +1570,28 @@ def health_check():
     pending_confirmations = len([f for f in os.listdir(PENDING_CONFIRMATIONS_DIR) if f.startswith("pending_") and not f.startswith("pending_rejection_")]) if os.path.exists(PENDING_CONFIRMATIONS_DIR) else 0
     pending_rejections = len([f for f in os.listdir(PENDING_CONFIRMATIONS_DIR) if f.startswith("pending_rejection_")]) if os.path.exists(PENDING_CONFIRMATIONS_DIR) else 0
     
+    # HR Manager-уудын тоо шалгах
+    hr_managers_count = 0
+    try:
+        hr_managers = get_hr_managers()
+        hr_managers_count = len(hr_managers)
+    except Exception as e:
+        logger.error(f"HR Manager-уудыг шалгахад алдаа: {str(e)}")
+    
     return jsonify({
         "status": "running",
         "message": "Flask Bot Server is running",
-        "endpoints": ["/api/messages", "/proactive-message", "/users", "/broadcast", "/leave-request", "/approval-callback", "/send-by-conversation"],
+        "endpoints": ["/api/messages", "/proactive-message", "/users", "/broadcast", "/leave-request", "/approval-callback", "/send-by-conversation", "/hr-managers", "/manager-timeout-test", "/replacement-worker", "/replacement-workers/<email>", "/auto-remove-replacement-workers", "/cleanup-expired-leaves"],
         "app_id_configured": bool(os.getenv("MICROSOFT_APP_ID")),
         "stored_users": len(list_all_users()),
         "pending_confirmations": pending_confirmations,
-        "pending_rejections": pending_rejections
+        "pending_rejections": pending_rejections,
+        "active_timers": len(active_timers),
+        "confirmation_timeout_minutes": CONFIRMATION_TIMEOUT_SECONDS // 60,
+        "manager_pending_actions": len(manager_pending_actions),
+        "manager_response_timeout_hours": MANAGER_RESPONSE_TIMEOUT_SECONDS // 3600,
+        "hr_managers_found": hr_managers_count,
+        "microsoft_graph_configured": bool(TENANT_ID and CLIENT_ID and CLIENT_SECRET)
     })
 
 @app.route("/users", methods=["GET"])
@@ -1152,6 +1599,191 @@ def get_users():
     """Хадгалагдсан хэрэглэгчдийн жагсаалт"""
     users = list_all_users()
     return jsonify({"users": users, "count": len(users)})
+
+@app.route("/hr-managers", methods=["GET"])
+def get_hr_managers_endpoint():
+    """HR Manager-уудын жагсаалт"""
+    try:
+        hr_managers = get_hr_managers()
+        return jsonify({
+            "hr_managers": hr_managers, 
+            "count": len(hr_managers),
+            "status": "success"
+        })
+    except Exception as e:
+        logger.error(f"HR Manager endpoint алдаа: {str(e)}")
+        return jsonify({
+            "hr_managers": [], 
+            "count": 0,
+            "status": "error",
+            "error": str(e)
+        }), 500
+
+@app.route("/manager-timeout-test", methods=["POST"])
+def test_manager_timeout():
+    """Manager timeout механизмыг тест хийх (debug зорилгоор)"""
+    try:
+        data = request.get_json()
+        request_id = data.get("request_id")
+        
+        if not request_id:
+            return jsonify({
+                "status": "error",
+                "message": "request_id шаардлагатай"
+            }), 400
+        
+        # Test request data үүсгэх
+        test_request_data = {
+            "request_id": request_id,
+            "requester_name": "Test User",
+            "requester_email": "test@fibo.cloud",
+            "start_date": "2024-01-15",
+            "end_date": "2024-01-16",
+            "days": 1,
+            "reason": "Test timeout",
+            "original_message": "Тест зорилгоор timeout механизм шалгах",
+            "created_at": datetime.now().isoformat()
+        }
+        
+        # Manager timeout тест (5 секунд)
+        test_timer = threading.Timer(5, handle_manager_response_timeout, args=[request_id, test_request_data])
+        test_timer.start()
+        manager_pending_actions[request_id] = test_timer
+        
+        logger.info(f"Test manager timeout timer эхлэсэн: {request_id}")
+        
+        return jsonify({
+            "status": "success", 
+            "message": f"Test timer эхлэсэн. 5 секундын дараа HR-руу мэдэгдэл илгээгдэнэ.",
+            "request_id": request_id,
+            "test_timeout_seconds": 5
+        })
+        
+    except Exception as e:
+        logger.error(f"Manager timeout test алдаа: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
+
+@app.route("/replacement-worker", methods=["POST"])
+def assign_replacement_worker_endpoint():
+    """Орлон ажиллах хүн томилох API"""
+    try:
+        data = request.get_json()
+        requester_email = data.get("requester_email", "").strip()
+        replacement_email = data.get("replacement_email", "").strip()
+        
+        if not requester_email or not replacement_email:
+            return jsonify({
+                "success": False,
+                "message": "requester_email болон replacement_email шаардлагатай"
+            }), 400
+        
+        result = assign_replacement_worker(requester_email, replacement_email)
+        
+        if result["success"]:
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        logger.error(f"Replacement worker assign endpoint алдаа: {str(e)}")
+        return jsonify({
+            "success": False,
+            "message": str(e)
+        }), 500
+
+@app.route("/replacement-worker", methods=["DELETE"])
+def remove_replacement_worker_endpoint():
+    """Орлон ажиллах хүн хасах API"""
+    try:
+        data = request.get_json()
+        requester_email = data.get("requester_email", "").strip()
+        replacement_email = data.get("replacement_email", "").strip()
+        
+        if not requester_email or not replacement_email:
+            return jsonify({
+                "success": False,
+                "message": "requester_email болон replacement_email шаардлагатай"
+            }), 400
+        
+        result = remove_replacement_worker(requester_email, replacement_email)
+        
+        if result["success"]:
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        logger.error(f"Replacement worker remove endpoint алдаа: {str(e)}")
+        return jsonify({
+            "success": False,
+            "message": str(e)
+        }), 500
+
+@app.route("/replacement-workers/<email>", methods=["GET"])
+def get_replacement_workers_endpoint(email):
+    """Орлон ажиллах хүмүүсийг жагсаах API"""
+    try:
+        result = get_replacement_workers(email)
+        
+        if result["success"]:
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        logger.error(f"Get replacement workers endpoint алдаа: {str(e)}")
+        return jsonify({
+            "success": False,
+            "message": str(e)
+        }), 500
+
+@app.route("/auto-remove-replacement-workers", methods=["POST"])
+def auto_remove_replacement_workers_endpoint():
+    """Чөлөө дуусахад орлон ажиллах хүмүүсийг автоматаар хасах API"""
+    try:
+        data = request.get_json()
+        requester_email = data.get("requester_email", "").strip()
+        
+        if not requester_email:
+            return jsonify({
+                "success": False,
+                "message": "requester_email шаардлагатай"
+            }), 400
+        
+        result = auto_remove_replacement_workers_on_leave_end(requester_email)
+        
+        if result["success"]:
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        logger.error(f"Auto remove replacement workers endpoint алдаа: {str(e)}")
+        return jsonify({
+            "success": False,
+            "message": str(e)
+        }), 500
+
+@app.route("/cleanup-expired-leaves", methods=["POST"])
+def cleanup_expired_leaves_endpoint():
+    """Дууссан чөлөөний орлон ажиллах хүмүүсийг цэвэрлэх API"""
+    try:
+        result = check_and_cleanup_expired_leaves()
+        
+        if result["success"]:
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        logger.error(f"Cleanup expired leaves endpoint алдаа: {str(e)}")
+        return jsonify({
+            "success": False,
+            "message": str(e)
+        }), 500
 
 @app.route("/leave-request", methods=["POST"])
 def submit_leave_request():
@@ -1325,7 +1957,7 @@ def process_messages():
                                     # Зөвшөөрсөн - менежер руу илгээх
                                     request_data = pending_confirmation["request_data"]
                                     
-                                    # Баталгаажуулалт устгах
+                                    # Timer цуцлах ба баталгаажуулалт устгах
                                     delete_pending_confirmation(user_id)
                                     
                                     # Хүсэлт хадгалах
@@ -1346,19 +1978,61 @@ def process_messages():
                                     else:
                                         api_status_msg = f"\n⚠️ Системд бүртгэхэд алдаа: {api_result.get('message', 'Unknown error')}"
                                     
-                                    await context.send_activity(f"✅ Чөлөөний хүсэлт баталгаажсан!\n📤 Менежер руу илгээгдэж байна...{api_status_msg}")
+                                    await context.send_activity(f"✅ Чөлөөний хүсэлт баталгаажсан!\n📤 Менежер болон HR руу илгээгдэж байна...{api_status_msg}")
                                     
                                     # Менежер руу илгээх
                                     await send_approved_request_to_manager(request_data, user_text)
                                     
+                                    # HR Manager-уудад мэдэгдэх
+                                    await send_notification_to_hr_managers(request_data, user_text, "approved")
+                                    
                                 elif confirmation_response == "reject":
-                                    # Татгалзсан - дахин оруулахыг хүсэх
+                                    # Татгалзсан - timer цуцлах ба дахин оруулахыг хүсэх
                                     delete_pending_confirmation(user_id)
                                     await context.send_activity("❌ Баталгаажуулалт цуцлагдлаа.\n\n🔄 Чөлөөний хүсэлтээ дахин илгээнэ үү. Дэлгэрэнгүй мэдээлэлтэй бичнэ үү.")
                                     
+                                elif confirmation_response == "cancel":
+                                    # Цуцалсан - timer цуцлах ба manager-д мэдэгдэх
+                                    request_data = pending_confirmation["request_data"]
+                                    delete_pending_confirmation(user_id)
+                                    
+                                    # External API дээр absence цуцлах
+                                    cancellation_api_result = None
+                                    absence_id = request_data.get("absence_id") or get_user_absence_id(user_id)
+                                    
+                                    if absence_id:
+                                        cancellation_api_result = await call_reject_absence_api(
+                                            absence_id, 
+                                            "Хэрэглэгч өөрөө цуцалсан"
+                                        )
+                                        if cancellation_api_result["success"]:
+                                            logger.info(f"External API cancellation successful for absence_id: {absence_id}")
+                                            # Хэрэглэгчийн absence_id устгах (цуцалсан тул)
+                                            clear_user_absence_id(user_id)
+                                        else:
+                                            logger.error(f"External API cancellation failed: {cancellation_api_result.get('message', 'Unknown error')}")
+                                    else:
+                                        logger.warning(f"No absence_id found for cancellation - request {request_data.get('request_id')} or user {user_id}")
+                                    
+                                    # API статус мэдээлэл
+                                    api_status_msg = ""
+                                    if cancellation_api_result:
+                                        if cancellation_api_result["success"]:
+                                            api_status_msg = "\n✅ Системээс мөн цуцлагдлаа"
+                                        else:
+                                            api_status_msg = f"\n⚠️ Системээс цуцлахад алдаа: {cancellation_api_result.get('message', 'Unknown error')}"
+                                    
+                                    await context.send_activity(f"🚫 Чөлөөний хүсэлт цуцлагдлаа.{api_status_msg}\n\n💼 Ахлагч танд мэдэгдэж байна.")
+                                    
+                                    # Manager руу цуцлах мэдээлэл илгээх
+                                    await send_cancellation_to_manager(request_data, user_text, cancellation_api_result)
+                                    
+                                    # HR Manager-уудад цуцлах мэдэгдэх
+                                    await send_notification_to_hr_managers(request_data, user_text, "cancelled")
+                                    
                                 else:
                                     # Ойлгомжгүй хариу
-                                    await context.send_activity('🤔 Ойлгосонгүй. "Тийм" эсвэл "Үгүй" гэж хариулна уу.\n\n• **"Тийм"** - Менежер руу илгээх\n• **"Үгүй"** - Засварлах')
+                                    await context.send_activity('🤔 Ойлгосонгүй. "Тийм", "Үгүй" эсвэл "Цуцлах" гэж хариулна уу.\n\n• **"Тийм"** - Менежер руу илгээх\n• **"Үгүй"** - Засварлах\n• **"Цуцлах"** - Бүрэн цуцлах')
                                 
                                 return
                             
@@ -1613,6 +2287,37 @@ async def handle_adaptive_card_action(context: TurnContext, action_data):
             request_data["approved_at"] = datetime.now().isoformat()
             request_data["approved_by"] = context.activity.from_property.id
             
+            # Manager хариу өгсөн тул 2 цагийн timer цуцлах
+            cancel_manager_response_timer(request_id)
+            
+            # Орлон ажиллах хүний мэдээлэл авах (adaptive card-аас)
+            replacement_email = None
+            replacement_result = None
+            if hasattr(context.activity, 'value') and context.activity.value:
+                replacement_email = context.activity.value.get('replacement_email', '').strip()
+                
+                if replacement_email:
+                    logger.info(f"Орлон ажиллах хүний и-мэйл оруулсан: {replacement_email}")
+                    # Орлон ажиллах хүн томилох
+                    replacement_result = assign_replacement_worker(
+                        request_data.get('requester_email', ''), 
+                        replacement_email
+                    )
+                    
+                    if replacement_result["success"]:
+                        logger.info(f"Орлон ажиллах хүн амжилттай томилогдлоо: {replacement_email}")
+                        request_data["replacement_worker"] = {
+                            "email": replacement_email,
+                            "assigned_at": datetime.now().isoformat(),
+                            "assigned_by": context.activity.from_property.id
+                        }
+                    else:
+                        logger.error(f"Орлон ажиллах хүн томилоход алдаа: {replacement_result['message']}")
+                else:
+                    logger.info("Орлон ажиллах хүний и-мэйл оруулаагүй")
+            else:
+                logger.info("Adaptive card value олдсонгүй")
+            
             # External API руу approval дуудлага хийх
             approval_api_result = None
             if request_data.get("absence_id"):
@@ -1658,7 +2363,14 @@ async def handle_adaptive_card_action(context: TurnContext, action_data):
                         else:
                             approval_status_msg = f"\n⚠️ Системд зөвшөөрөхэд алдаа: {approval_api_result.get('message', 'Unknown error')}"
                     
-                    await ctx.send_activity(f"🎉 Таны чөлөөний хүсэлт зөвшөөрөгдлөө!\n📅 {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног)\n✨ Сайхан амраарай!{approval_status_msg}{webhook_status_msg}")
+                    # Орлон ажиллах хүний мэдээлэл нэмэх
+                    replacement_info = ""
+                    if replacement_result and replacement_result["success"]:
+                        replacement_info = f"\n🔄 Орлон ажиллах хүн: {replacement_result['replacement']['name']} ({replacement_result['replacement']['email']})"
+                    elif replacement_email and replacement_result and not replacement_result["success"]:
+                        replacement_info = f"\n⚠️ Орлон ажиллах хүн томилоход алдаа: {replacement_result['message']}"
+                    
+                    await ctx.send_activity(f"🎉 Таны чөлөөний хүсэлт зөвшөөрөгдлөө!\n📅 {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног)\n✨ Сайхан амраарай!{approval_status_msg}{webhook_status_msg}{replacement_info}")
 
                 await ADAPTER.continue_conversation(
                     requester_conversation,
@@ -1667,6 +2379,9 @@ async def handle_adaptive_card_action(context: TurnContext, action_data):
                 )
             
         elif action == "reject":
+            # Manager хариу өгсөн тул 2 цагийн timer цуцлах
+            cancel_manager_response_timer(request_id)
+            
             # Manager-ээс татгалзах шалтгаан асуух
             manager_user_id = context.activity.from_property.id
             save_pending_rejection(manager_user_id, request_data)
@@ -1858,13 +2573,17 @@ def save_pending_confirmation(user_id, request_data):
             "user_id": user_id,
             "request_data": request_data,
             "created_at": datetime.now().isoformat(),
-            "status": "awaiting_confirmation"
+            "status": "awaiting_confirmation",
+            "timeout_seconds": CONFIRMATION_TIMEOUT_SECONDS
         }
         
         with open(filename, "w", encoding="utf-8") as f:
             json.dump(confirmation_data, f, ensure_ascii=False, indent=2)
         
-        logger.info(f"Saved pending confirmation for user {user_id}")
+        # 30 минутын timeout timer эхлүүлэх
+        start_confirmation_timer(user_id)
+        
+        logger.info(f"Saved pending confirmation for user {user_id} with {CONFIRMATION_TIMEOUT_SECONDS}s timeout")
         return True
     except Exception as e:
         logger.error(f"Failed to save pending confirmation: {str(e)}")
@@ -1894,10 +2613,148 @@ def delete_pending_confirmation(user_id):
         if os.path.exists(filename):
             os.remove(filename)
             logger.info(f"Deleted pending confirmation for user {user_id}")
+        
+        # Timer цуцлах
+        cancel_confirmation_timer(user_id)
         return True
     except Exception as e:
         logger.error(f"Failed to delete pending confirmation: {str(e)}")
         return False
+
+def start_confirmation_timer(user_id):
+    """Хэрэглэгчийн баталгаажуулалтын timeout timer эхлүүлэх"""
+    try:
+        # Хуучин timer байвал цуцлах
+        cancel_confirmation_timer(user_id)
+        
+        # Шинэ timer үүсгэх
+        timer = threading.Timer(CONFIRMATION_TIMEOUT_SECONDS, handle_confirmation_timeout, args=[user_id])
+        timer.start()
+        active_timers[user_id] = timer
+        
+        logger.info(f"Started {CONFIRMATION_TIMEOUT_SECONDS}s confirmation timer for user {user_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to start confirmation timer for user {user_id}: {str(e)}")
+        return False
+
+def cancel_confirmation_timer(user_id):
+    """Хэрэглэгчийн баталгаажуулалтын timer цуцлах"""
+    try:
+        if user_id in active_timers:
+            timer = active_timers[user_id]
+            timer.cancel()
+            del active_timers[user_id]
+            logger.info(f"Cancelled confirmation timer for user {user_id}")
+            return True
+    except Exception as e:
+        logger.error(f"Failed to cancel confirmation timer for user {user_id}: {str(e)}")
+        return False
+
+def handle_confirmation_timeout(user_id):
+    """Баталгаажуулалтын timeout болоход дуудагдах функц"""
+    try:
+        logger.info(f"Confirmation timeout for user {user_id}")
+        
+        # Pending confirmation файл байгаа эсэхийг шалгах
+        pending_confirmation = load_pending_confirmation(user_id)
+        if not pending_confirmation:
+            logger.info(f"No pending confirmation found for user {user_id} - might have been processed already")
+            return
+        
+        request_data = pending_confirmation.get("request_data", {})
+        
+        # Timeout мессеж илгээх (External API дээр цуцлах шаардлагагүй - absence_id үүсээгүй)
+        conversation_reference = load_conversation_reference(user_id)
+        if conversation_reference:
+            async def send_timeout_message(context: TurnContext):
+                await context.send_activity(
+                    "⏰ Таны чөлөөний хүсэлтийн баталгаажуулалтын хугацаа (30 минут) дууссан байна.\n\n"
+                    "🔄 Шинээр чөлөөний хүсэлт илгээнэ үү. Дэлгэрэнгүй мэдээлэлтэй бичнэ үү."
+                )
+            
+            # Async функцийг sync context-д ажиллуулах
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(
+                    ADAPTER.continue_conversation(
+                        conversation_reference,
+                        send_timeout_message,
+                        app_id
+                    )
+                )
+            except Exception as e:
+                logger.error(f"Failed to send timeout message to user {user_id}: {str(e)}")
+            finally:
+                loop.close()
+        
+        # Manager руу timeout мэдээлэл илгээх шаардлагагүй - absence_id үүсээгүй тул зүгээр л процесс шинээр эхлэнэ
+        logger.info(f"Timeout processed - no external API call needed as absence_id was not created yet")
+        
+        # Pending confirmation устгах
+        delete_pending_confirmation(user_id)
+        
+        logger.info(f"Handled confirmation timeout for user {user_id}")
+        
+    except Exception as e:
+        logger.error(f"Error handling confirmation timeout for user {user_id}: {str(e)}")
+
+def start_manager_response_timer(request_id, request_data):
+    """Manager-ын хариуг хүлээх 2 цагийн timer эхлүүлэх"""
+    try:
+        # Хуучин timer байвал цуцлах
+        cancel_manager_response_timer(request_id)
+        
+        # Шинэ timer үүсгэх
+        timer = threading.Timer(MANAGER_RESPONSE_TIMEOUT_SECONDS, handle_manager_response_timeout, args=[request_id, request_data])
+        timer.start()
+        manager_pending_actions[request_id] = timer
+        
+        logger.info(f"Started {MANAGER_RESPONSE_TIMEOUT_SECONDS}s manager response timer for request {request_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to start manager response timer for request {request_id}: {str(e)}")
+        return False
+
+def cancel_manager_response_timer(request_id):
+    """Manager-ын хариуг хүлээх timer цуцлах"""
+    try:
+        if request_id in manager_pending_actions:
+            timer = manager_pending_actions[request_id]
+            timer.cancel()
+            del manager_pending_actions[request_id]
+            logger.info(f"Cancelled manager response timer for request {request_id}")
+            return True
+    except Exception as e:
+        logger.error(f"Failed to cancel manager response timer for request {request_id}: {str(e)}")
+        return False
+
+def handle_manager_response_timeout(request_id, request_data):
+    """Manager хариу өгөөгүй 2 цагийн timeout болоход дуудагдах функц"""
+    try:
+        logger.info(f"Manager response timeout for request {request_id}")
+        
+        # Timer-ээс устгах
+        if request_id in manager_pending_actions:
+            del manager_pending_actions[request_id]
+        
+        # HR Manager-уудад timeout мэдэгдэл илгээх
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(
+                send_manager_timeout_to_hr(request_data)
+            )
+        except Exception as e:
+            logger.error(f"Failed to send manager timeout notification to HR: {str(e)}")
+        finally:
+            loop.close()
+        
+        logger.info(f"Handled manager response timeout for request {request_id}")
+        
+    except Exception as e:
+        logger.error(f"Error handling manager response timeout for request {request_id}: {str(e)}")
 
 def save_pending_rejection(manager_user_id, request_data):
     """Manager-н татгалзах шалтгааныг хүлээж буй мэдээллийг хадгалах"""
@@ -1966,6 +2823,17 @@ def is_confirmation_response(text):
         'засна', 'шинээр', 'дахин', 'өөрчлөх', 'зөв биш', 'ugui', 'ugu', 'gu', 'zasna', 'zasan', 'zasnaa'
     ]
     
+    # Цуцлах үгүүд
+    cancel_words = [
+        'цуцлах', 'цуцлана', 'cancel', 'хүсэхгүй', 'хэрэггүй', 'болиулах', 
+        'болиулна', 'цуцал', 'stop', 'битгий', 'авахгүй', 'cuclah', 'cuclana', 'cucel'
+    ]
+    
+    # Цуцлахыг эхэндээ шалгах (илүү тодорхой команд)
+    for word in cancel_words:
+        if word in text_lower:
+            return "cancel"
+    
     for word in approve_words:
         if word in text_lower:
             return "approve"
@@ -1978,6 +2846,8 @@ def is_confirmation_response(text):
 
 def create_confirmation_message(parsed_data, user_email=None):
     """Баталгаажуулалтын мессеж үүсгэх"""
+    timeout_minutes = CONFIRMATION_TIMEOUT_SECONDS // 60  # Секундээс минут руу хөрвүүлэх
+    
     message = f"""🔍 Таны чөлөөний хүсэлтээс дараах мэдээллийг олж авлаа:
 
 📅 **Эхлэх огноо:** {parsed_data.get('start_date')}
@@ -1990,7 +2860,10 @@ def create_confirmation_message(parsed_data, user_email=None):
 
 💬 Хариулна уу:
 • **"Тийм"** эсвэл **"Зөв"** - Илгээх
-• **"Үгүй"** эсвэл **"Засна"** - Засварлах"""
+• **"Үгүй"** эсвэл **"Засна"** - Засварлах
+• **"Цуцлах"** эсвэл **"Cancel"** - Бүрэн цуцлах
+
+⏰ **Анхаарах:** {timeout_minutes} минутын дотор хариулахгүй бол процесс дахин эхлэнэ."""
     
     # Planner tasks мэдээлэл нэмэх
     if user_email and PLANNER_AVAILABLE:
@@ -2024,8 +2897,14 @@ async def send_approved_request_to_manager(request_data, original_message):
                     except Exception as e:
                         logger.error(f"Failed to get planner tasks for approved request: {str(e)}")
                 
+                # Орлон ажиллах хүний мэдээлэл нэмэх (manager-д мэдэгдэхэд)
+                replacement_info_for_manager = ""
+                if request_data.get("replacement_worker"):
+                    replacement_worker = request_data["replacement_worker"]
+                    replacement_info_for_manager = f"\n🔄 Орлон ажиллах хүн томилогдсон: {replacement_worker['email']}"
+                
                 message = MessageFactory.attachment(adaptive_card_attachment)
-                message.text = f"📨 Баталгаажсан чөлөөний хүсэлт: {request_data['requester_name']}\n💬 Анхны мессеж: \"{original_message}\"\n✅ Хэрэглэгч баталгаажуулсан{planner_info}"
+                message.text = f"📨 Баталгаажсан чөлөөний хүсэлт: {request_data['requester_name']}\n💬 Анхны мессеж: \"{original_message}\"\n✅ Хэрэглэгч баталгаажуулсан{replacement_info_for_manager}{planner_info}"
                 await ctx.send_activity(message)
             
             await ADAPTER.continue_conversation(
@@ -2033,11 +2912,169 @@ async def send_approved_request_to_manager(request_data, original_message):
                 notify_manager_with_card,
                 app_id
             )
-            logger.info(f"Approved leave request {request_data['request_id']} sent to manager")
+            
+            # Manager-ын хариуг хүлээх 2 цагийн timer эхлүүлэх
+            start_manager_response_timer(request_data['request_id'], request_data)
+            
+            logger.info(f"Approved leave request {request_data['request_id']} sent to manager with 2-hour response timer")
         else: 
             logger.warning(f"Manager conversation reference not found for request {request_data['request_id']}")
     except Exception as e:
         logger.error(f"Error sending approved request to manager: {str(e)}")
+
+async def send_cancellation_to_manager(request_data, original_message, cancellation_api_result=None):
+    """Цуцалсан чөлөөний хүсэлтийг менежер руу мэдэгдэх"""
+    try:
+        approver_conversation = load_conversation_reference(APPROVER_USER_ID)
+        
+        if approver_conversation:
+            async def notify_manager_cancellation(ctx: TurnContext):
+                # Planner tasks мэдээлэл авах
+                planner_info = ""
+                if request_data.get("requester_email"):
+                    try:
+                        planner_info = f"\n\n{get_user_planner_tasks(request_data['requester_email'])}"
+                    except Exception as e:
+                        logger.error(f"Failed to get planner tasks for cancelled request: {str(e)}")
+                
+                # API статус мэдээлэл нэмэх
+                api_status_info = ""
+                if cancellation_api_result:
+                    if cancellation_api_result["success"]:
+                        api_status_info = "\n✅ **Системээс автоматаар цуцлагдсан**"
+                    else:
+                        api_status_info = f"\n⚠️ **Системээс цуцлахад алдаа:** {cancellation_api_result.get('message', 'Unknown error')}"
+                elif request_data.get("absence_id"):
+                    api_status_info = "\n❓ **Системийн статус:** Мэдээлэл алга"
+                
+                # Цуцлах мэдээлэл
+                cancellation_message = f"""🚫 **ЦУЦАЛСАН ЧӨЛӨӨНИЙ ХҮСЭЛТ**
+
+👤 **Хүсэлт гаргагч:** {request_data['requester_name']}
+📧 **Имэйл:** {request_data.get('requester_email', 'N/A')}
+📅 **Хугацаа:** {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног)
+💭 **Шалтгаан байсан:** {request_data['reason']}
+💬 **Анхны мессеж:** "{original_message}"
+
+❌ **Хэрэглэгч өөрөө цуцалсан байна**
+🕐 **Цуцалсан цаг:** {datetime.now().strftime('%Y-%m-%d %H:%M')}{api_status_info}{planner_info}"""
+                
+                await ctx.send_activity(cancellation_message)
+            
+            await ADAPTER.continue_conversation(
+                approver_conversation,
+                notify_manager_cancellation,
+                app_id
+            )
+            logger.info(f"Cancelled leave request {request_data['request_id']} notification sent to manager")
+        else: 
+            logger.warning(f"Manager conversation reference not found for cancelled request {request_data['request_id']}")
+    except Exception as e:
+        logger.error(f"Error sending cancellation to manager: {str(e)}")
+
+async def send_notification_to_hr_managers(request_data, original_message, action_type="approved"):
+    """HR Manager-уудад чөлөөний хүсэлтийн мэдэгдэл илгээх (товчгүй)"""
+    try:
+        hr_managers = get_hr_managers()
+        
+        if not hr_managers:
+            logger.warning("HR Manager олдсонгүй - HR мэдэгдэл илгээхгүй")
+            return
+        
+        # Planner tasks мэдээлэл авах
+        planner_info = ""
+        if request_data.get("requester_email"):
+            try:
+                planner_info = f"\n\n{get_user_planner_tasks(request_data['requester_email'])}"
+            except Exception as e:
+                logger.error(f"Failed to get planner tasks for HR notification: {str(e)}")
+        
+        # Action type-аар мессеж өөрчлөх
+        if action_type == "approved":
+            title = "📨 **БАТАЛГААЖСАН ЧӨЛӨӨНИЙ ХҮСЭЛТ**"
+            status_text = "✅ **Ажлын менежер зөвшөөрсөн**"
+        elif action_type == "cancelled":
+            title = "🚫 **ЦУЦАЛСАН ЧӨЛӨӨНИЙ ХҮСЭЛТ**"  
+            status_text = "❌ **Хэрэглэгч өөрөө цуцалсан байна**"
+        else:
+            title = "📋 **ЧӨЛӨӨНИЙ ХҮСЭЛТ**"
+            status_text = "ℹ️ **Мэдээлэл**"
+        
+        # HR мэдэгдэлийн мессеж
+        hr_message = f"""{title}
+
+👤 **Хүсэлт гаргагч:** {request_data['requester_name']}
+📧 **Имэйл:** {request_data.get('requester_email', 'N/A')}
+📅 **Хугацаа:** {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног)
+💭 **Шалтгаан:** {request_data['reason']}
+💬 **Анхны мессеж:** "{original_message}"
+
+{status_text}
+🕐 **Огноо:** {datetime.now().strftime('%Y-%m-%d %H:%M')}
+
+ℹ️ **HR-ын анхаарал:** Энэ нь зөвхөн мэдээллийн зорилготой мэдэгдэл юм.{planner_info}"""
+        
+        # HR Manager-уудад мэдэгдэл илгээх (Teams бот conversation байхгүй учир email-аар илгээх эсвэл log-д бичнэ)
+        for hr_manager in hr_managers:
+            logger.info(f"HR Manager-д мэдэгдэл: {hr_manager.get('displayName')} ({hr_manager.get('mail')})")
+            logger.info(f"HR Message: {hr_message}")
+            
+        logger.info(f"HR мэдэгдэл {len(hr_managers)} HR Manager-д илгээгдлээ")
+        
+        # TODO: Хэрэв HR Manager-уудтай Teams bot conversation байвал тэнд илгээж болно
+        # Одоогоор зөвхөн log-д бичиж байна
+        
+    except Exception as e:
+        logger.error(f"Error sending notification to HR managers: {str(e)}")
+
+async def send_manager_timeout_to_hr(request_data):
+    """Manager 2 цаг хариу өгөөгүй үед HR Manager-уудад мэдэгдэх"""
+    try:
+        hr_managers = get_hr_managers()
+        
+        if not hr_managers:
+            logger.warning("HR Manager олдсонгүй - manager timeout мэдэгдэл илгээхгүй")
+            return
+        
+        # Planner tasks мэдээлэл авах
+        planner_info = ""
+        if request_data.get("requester_email"):
+            try:
+                planner_info = f"\n\n{get_user_planner_tasks(request_data['requester_email'])}"
+            except Exception as e:
+                logger.error(f"Failed to get planner tasks for manager timeout: {str(e)}")
+        
+        # Manager timeout мэдэгдэлийн мессеж
+        timeout_hours = MANAGER_RESPONSE_TIMEOUT_SECONDS // 3600  # Секундээс цаг руу хөрвүүлэх
+        timeout_message = f"""⏰ **МЕНЕЖЕР ХАРИУ ӨГӨӨГҮЙ - АНХААРАЛ!**
+
+👤 **Хүсэлт гаргагч:** {request_data['requester_name']}
+📧 **Имэйл:** {request_data.get('requester_email', 'N/A')}
+📅 **Хугацаа:** {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног)
+💭 **Шалтгаан:** {request_data['reason']}
+💬 **Анхны мессеж:** "{request_data.get('original_message', 'N/A')}"
+
+⚠️ **Асуудал:** Ажлын менежер {timeout_hours} цагийн дотор хариу үйлдэл үзүүлээгүй байна
+📤 **Илгээгдсэн огноо:** {request_data.get('created_at', 'N/A')}
+🕐 **Одоогийн цаг:** {datetime.now().strftime('%Y-%m-%d %H:%M')}
+
+🔔 **HR-ын үйлдэл:** Менежертэй холбогдож, хүсэлтийн талаар асууна уу.
+👨‍💼 **Менежер:** {APPROVER_EMAIL}{planner_info}"""
+        
+        # HR Manager-уудад timeout мэдэгдэл илгээх
+        for hr_manager in hr_managers:
+            logger.info(f"Manager timeout мэдэгдэл HR-д: {hr_manager.get('displayName')} ({hr_manager.get('mail')})")
+            logger.info(f"Timeout Message: {timeout_message}")
+            
+        logger.info(f"Manager timeout мэдэгдэл {len(hr_managers)} HR Manager-д илгээгдлээ")
+        
+        # TODO: Хэрэв HR Manager-уудтай Teams bot conversation байвал тэнд илгээж болно
+        # Одоогоор зөвхөн log-д бичиж байна
+        
+    except Exception as e:
+        logger.error(f"Error sending manager timeout notification to HR: {str(e)}")
+
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
