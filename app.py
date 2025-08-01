@@ -822,14 +822,20 @@ async def call_reject_absence_api(absence_id, comment=""):
             "message": str(e)
         }
     
-async def send_teams_webhook_notification(requester_name):
+async def send_teams_webhook_notification(requester_name, replacement_worker_name=None):
     """Teams webhook руу зөвшөөрөлийн мэдэгдэл илгээх"""
     try:
         webhook_url = "https://prod-36.southeastasia.logic.azure.com:443/workflows/6dcb3cbe39124404a12b754720b25699/triggers/manual/paths/invoke?api-version=2016-06-01&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=nhqRPaYSLixFlWOePwBHVlyWrbAv6OL7h0SNclMZS0U"
         
+        # Орлон ажиллах хүний мэдээлэл нэмэх
+        if replacement_worker_name:
+            message = f"{requester_name} чөлөө авсан шүү, манайхаан. Орлон ажиллах: {replacement_worker_name}"
+        else:
+            message = f"{requester_name} чөлөө авсан шүү, манайхаан."
+        
         # Teams webhook payload бэлтгэх
         payload = {
-            "message": f"{requester_name} чөлөө авсан шүү, манайхаан."
+            "message": message
         }
         
         logger.info(f"Sending Teams webhook notification for {requester_name}")
@@ -2335,8 +2341,15 @@ async def handle_adaptive_card_action(context: TurnContext, action_data):
             # Хүсэлт хадгалах
             save_leave_request(request_data)
             
-            # Teams webhook руу мэдэгдэл илгээх
-            webhook_result = await send_teams_webhook_notification(request_data["requester_name"])
+            # Teams webhook руу мэдэгдэл илгээх (орлон ажиллах хүний мэдээлэлтэй)
+            replacement_worker_name = None
+            if replacement_result and replacement_result["success"]:
+                replacement_worker_name = replacement_result['replacement']['name']
+            
+            webhook_result = await send_teams_webhook_notification(
+                request_data["requester_name"], 
+                replacement_worker_name
+            )
             webhook_status_msg = ""
             if webhook_result["success"]:
                 webhook_status_msg = "\n📢 Teams-д мэдэгдэл илгээгдлээ"
