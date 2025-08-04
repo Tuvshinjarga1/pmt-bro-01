@@ -56,8 +56,11 @@ for directory in [CONVERSATION_DIR, LEAVE_REQUESTS_DIR, PENDING_CONFIRMATIONS_DI
         os.makedirs(directory)
 
 # Approval хийх хүний мэдээлэл (Bayarmunkh)
-APPROVER_EMAIL = "bayarmunkh@fibo.cloud"
-APPROVER_USER_ID = "29:1kIuFRh3SgMXCUqtZSJBjHDaDmVF7l2-zXmi3qZNRBokdrt8QxiwyVPutdFsMKMp1R-tF52PqrhmqHegty9X2JA"
+APPROVER_EMAIL = "bulgantamir@fibo.cloud"
+APPROVER_USER_ID = "29:1oR0wAOz-uFvezPo6utf0ZQK9yeX34r6PHyWy0LMPKVvJccvzpy2nWKZPSEWEaV-poGyo004TMsQRBtor0YAQOw"
+
+# APPROVER_EMAIL = "bayarmunkh@fibo.cloud"
+# APPROVER_USER_ID = "29:1kIuFRh3SgMXCUqtZSJBjHDaDmVF7l2-zXmi3qZNRBokdrt8QxiwyVPutdFsMKMp1R-tF52PqrhmqHegty9X2JA"
 
 # Timeout механизм - 30 минут = 1800 секунд
 CONFIRMATION_TIMEOUT_SECONDS = 30 * 60  # 30 минут
@@ -633,7 +636,7 @@ async def call_external_absence_api(request_data):
                 "user_email": "test_user10@fibo.cloud",
                 "start_date": "2025-07-30",
                 "end_date": "2025-07-31",
-                "reason": "test",
+                "reason": "DayOff",
                 "in_active_hours": 8
             }
         }
