@@ -463,7 +463,7 @@ def check_and_cleanup_expired_leaves():
         return {"success": False, "message": str(e)}
 
 def get_hr_managers() -> List[Dict]:
-    """HR Manager-уудын жагсаалтыг авах"""
+    """HR Manager-уудын жагсаалтыг авах (зөвхөн timeout үед ашиглах)"""
     try:
         access_token = get_graph_access_token()
         if not access_token:
@@ -825,16 +825,29 @@ async def call_reject_absence_api(absence_id, comment=""):
             "message": str(e)
         }
     
-async def send_teams_webhook_notification(requester_name, replacement_worker_name=None):
+async def send_teams_webhook_notification(requester_name, replacement_worker_name=None, request_data=None):
     """Teams webhook руу зөвшөөрөлийн мэдэгдэл илгээх"""
     try:
         webhook_url = "https://prod-36.southeastasia.logic.azure.com:443/workflows/6dcb3cbe39124404a12b754720b25699/triggers/manual/paths/invoke?api-version=2016-06-01&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=nhqRPaYSLixFlWOePwBHVlyWrbAv6OL7h0SNclMZS0U"
         
+        # Чөлөөний дэлгэрэнгүй мэдээлэл бэлтгэх
+        leave_details = ""
+        if request_data:
+            start_date = request_data.get('start_date', 'N/A')
+            end_date = request_data.get('end_date', 'N/A')
+            days = request_data.get('days', 'N/A')
+            reason = request_data.get('reason', 'N/A')
+            inactive_hours = request_data.get('inactive_hours', 'N/A')
+            
+            leave_details = f"\n📅 Хугацаа: {start_date} - {end_date} ({days} хоног)"
+            leave_details += f"\n⏰ Цагийн тоо: {inactive_hours} цаг"
+            # leave_details += f"\n💭 Шалтгаан: {reason}"
+        
         # Орлон ажиллах хүний мэдээлэл нэмэх
         if replacement_worker_name:
-            message = f"{requester_name} чөлөө авсан шүү, манайхаан. Орлон ажиллах: {replacement_worker_name}"
+            message = f"{requester_name} чөлөө авсан шүү, манайхаан.{leave_details}\n🔄 Орлон ажиллах: {replacement_worker_name}"
         else:
-            message = f"{requester_name} чөлөө авсан шүү, манайхаан."
+            message = f"{requester_name} чөлөө авсан шүү, манайхаан.{leave_details}"
         
         # Teams webhook payload бэлтгэх
         payload = {
@@ -1579,18 +1592,12 @@ def health_check():
     pending_confirmations = len([f for f in os.listdir(PENDING_CONFIRMATIONS_DIR) if f.startswith("pending_") and not f.startswith("pending_rejection_")]) if os.path.exists(PENDING_CONFIRMATIONS_DIR) else 0
     pending_rejections = len([f for f in os.listdir(PENDING_CONFIRMATIONS_DIR) if f.startswith("pending_rejection_")]) if os.path.exists(PENDING_CONFIRMATIONS_DIR) else 0
     
-    # HR Manager-уудын тоо шалгах
-    hr_managers_count = 0
-    try:
-        hr_managers = get_hr_managers()
-        hr_managers_count = len(hr_managers)
-    except Exception as e:
-        logger.error(f"HR Manager-уудыг шалгахад алдаа: {str(e)}")
+    # HR Manager-уудын тоо шалгах - хасагдсан
     
     return jsonify({
         "status": "running",
         "message": "Flask Bot Server is running",
-        "endpoints": ["/api/messages", "/proactive-message", "/users", "/broadcast", "/leave-request", "/approval-callback", "/send-by-conversation", "/hr-managers", "/manager-timeout-test", "/replacement-worker", "/replacement-workers/<email>", "/auto-remove-replacement-workers", "/cleanup-expired-leaves"],
+        "endpoints": ["/api/messages", "/proactive-message", "/users", "/broadcast", "/leave-request", "/approval-callback", "/send-by-conversation", "/manager-timeout-test", "/replacement-worker", "/replacement-workers/<email>", "/auto-remove-replacement-workers", "/cleanup-expired-leaves"],
         "app_id_configured": bool(os.getenv("MICROSOFT_APP_ID")),
         "stored_users": len(list_all_users()),
         "pending_confirmations": pending_confirmations,
@@ -1599,7 +1606,6 @@ def health_check():
         "confirmation_timeout_minutes": CONFIRMATION_TIMEOUT_SECONDS // 60,
         "manager_pending_actions": len(manager_pending_actions),
         "manager_response_timeout_hours": MANAGER_RESPONSE_TIMEOUT_SECONDS // 3600,
-        "hr_managers_found": hr_managers_count,
         "microsoft_graph_configured": bool(TENANT_ID and CLIENT_ID and CLIENT_SECRET)
     })
 
@@ -1609,24 +1615,7 @@ def get_users():
     users = list_all_users()
     return jsonify({"users": users, "count": len(users)})
 
-@app.route("/hr-managers", methods=["GET"])
-def get_hr_managers_endpoint():
-    """HR Manager-уудын жагсаалт"""
-    try:
-        hr_managers = get_hr_managers()
-        return jsonify({
-            "hr_managers": hr_managers, 
-            "count": len(hr_managers),
-            "status": "success"
-        })
-    except Exception as e:
-        logger.error(f"HR Manager endpoint алдаа: {str(e)}")
-        return jsonify({
-            "hr_managers": [], 
-            "count": 0,
-            "status": "error",
-            "error": str(e)
-        }), 500
+# HR Manager endpoint хасагдсан
 
 @app.route("/manager-timeout-test", methods=["POST"])
 def test_manager_timeout():
@@ -1987,13 +1976,10 @@ def process_messages():
                                     else:
                                         api_status_msg = f"\n⚠️ Системд бүртгэхэд алдаа: {api_result.get('message', 'Unknown error')}"
                                     
-                                    await context.send_activity(f"✅ Чөлөөний хүсэлт баталгаажсан!\n📤 Менежер болон HR руу илгээгдэж байна...{api_status_msg}")
+                                    await context.send_activity(f"✅ Чөлөөний хүсэлт баталгаажсан!\n📤 Менежер руу илгээгдэж байна...{api_status_msg}")
                                     
                                     # Менежер руу илгээх
                                     await send_approved_request_to_manager(request_data, user_text)
-                                    
-                                    # HR Manager-уудад мэдэгдэх
-                                    await send_notification_to_hr_managers(request_data, user_text, "approved")
                                     
                                 elif confirmation_response == "reject":
                                     # Татгалзсан - timer цуцлах ба дахин оруулахыг хүсэх
@@ -2035,9 +2021,6 @@ def process_messages():
                                     
                                     # Manager руу цуцлах мэдээлэл илгээх
                                     await send_cancellation_to_manager(request_data, user_text, cancellation_api_result)
-                                    
-                                    # HR Manager-уудад цуцлах мэдэгдэх
-                                    await send_notification_to_hr_managers(request_data, user_text, "cancelled")
                                     
                                 else:
                                     # Ойлгомжгүй хариу
@@ -2351,7 +2334,8 @@ async def handle_adaptive_card_action(context: TurnContext, action_data):
             
             webhook_result = await send_teams_webhook_notification(
                 request_data["requester_name"], 
-                replacement_worker_name
+                replacement_worker_name,
+                request_data
             )
             webhook_status_msg = ""
             if webhook_result["success"]:
@@ -2988,60 +2972,7 @@ async def send_cancellation_to_manager(request_data, original_message, cancellat
     except Exception as e:
         logger.error(f"Error sending cancellation to manager: {str(e)}")
 
-async def send_notification_to_hr_managers(request_data, original_message, action_type="approved"):
-    """HR Manager-уудад чөлөөний хүсэлтийн мэдэгдэл илгээх (товчгүй)"""
-    try:
-        hr_managers = get_hr_managers()
-        
-        if not hr_managers:
-            logger.warning("HR Manager олдсонгүй - HR мэдэгдэл илгээхгүй")
-            return
-        
-        # Planner tasks мэдээлэл авах
-        planner_info = ""
-        if request_data.get("requester_email"):
-            try:
-                planner_info = f"\n\n{get_user_planner_tasks(request_data['requester_email'])}"
-            except Exception as e:
-                logger.error(f"Failed to get planner tasks for HR notification: {str(e)}")
-        
-        # Action type-аар мессеж өөрчлөх
-        if action_type == "approved":
-            title = "📨 **БАТАЛГААЖСАН ЧӨЛӨӨНИЙ ХҮСЭЛТ**"
-            status_text = "✅ **Ажлын менежер зөвшөөрсөн**"
-        elif action_type == "cancelled":
-            title = "🚫 **ЦУЦАЛСАН ЧӨЛӨӨНИЙ ХҮСЭЛТ**"  
-            status_text = "❌ **Хэрэглэгч өөрөө цуцалсан байна**"
-        else:
-            title = "📋 **ЧӨЛӨӨНИЙ ХҮСЭЛТ**"
-            status_text = "ℹ️ **Мэдээлэл**"
-        
-        # HR мэдэгдэлийн мессеж
-        hr_message = f"""{title}
-
-👤 **Хүсэлт гаргагч:** {request_data['requester_name']}
-📧 **Имэйл:** {request_data.get('requester_email', 'N/A')}
-📅 **Хугацаа:** {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног)
-💭 **Шалтгаан:** {request_data['reason']}
-💬 **Анхны мессеж:** "{original_message}"
-
-{status_text}
-🕐 **Огноо:** {datetime.now().strftime('%Y-%m-%d %H:%M')}
-
-ℹ️ **HR-ын анхаарал:** Энэ нь зөвхөн мэдээллийн зорилготой мэдэгдэл юм.{planner_info}"""
-        
-        # HR Manager-уудад мэдэгдэл илгээх (Teams бот conversation байхгүй учир email-аар илгээх эсвэл log-д бичнэ)
-        for hr_manager in hr_managers:
-            logger.info(f"HR Manager-д мэдэгдэл: {hr_manager.get('displayName')} ({hr_manager.get('mail')})")
-            logger.info(f"HR Message: {hr_message}")
-            
-        logger.info(f"HR мэдэгдэл {len(hr_managers)} HR Manager-д илгээгдлээ")
-        
-        # TODO: Хэрэв HR Manager-уудтай Teams bot conversation байвал тэнд илгээж болно
-        # Одоогоор зөвхөн log-д бичиж байна
-        
-    except Exception as e:
-        logger.error(f"Error sending notification to HR managers: {str(e)}")
+# HR руу илгээх үйлдэл хасагдсан - зөвхөн manager timeout үед мэдэгдэх
 
 async def send_manager_timeout_to_hr(request_data):
     """Manager 2 цаг хариу өгөөгүй үед HR Manager-уудад мэдэгдэх"""
