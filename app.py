@@ -634,11 +634,10 @@ async def call_external_absence_api(request_data):
             "function": "create_absence_request",
             "args": {
                 "user_email": "test_user10@fibo.cloud",
-                "start_date": "2025-07-30",
-                "end_date": "2025-07-31",
+                "start_date": request_data.get("start_date"),
+                "end_date": request_data.get("end_date"),
                 "reason": "day_off",
-                "in_active_hours": 8,
-                "leader_id": '106'
+                "in_active_hours": request_data.get("inactive_hours", 8)
             }
         }
         
@@ -837,7 +836,7 @@ async def send_teams_webhook_notification(requester_name, replacement_worker_nam
     try:
         webhook_url = "https://prod-36.southeastasia.logic.azure.com:443/workflows/6dcb3cbe39124404a12b754720b25699/triggers/manual/paths/invoke?api-version=2016-06-01&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=nhqRPaYSLixFlWOePwBHVlyWrbAv6OL7h0SNclMZS0U"
         
-        # Чөлөөний дэлгэрэнгүй мэдээлэл бэлтгэх
+        # Чөлөөний дэлгэрэнгүй мэдээлэл бэлтгэх - Teams форматтай
         leave_details = ""
         if request_data:
             start_date = request_data.get('start_date', 'N/A')
@@ -846,17 +845,18 @@ async def send_teams_webhook_notification(requester_name, replacement_worker_nam
             reason = request_data.get('reason', 'N/A')
             inactive_hours = request_data.get('inactive_hours', 'N/A')
             
-            leave_details = f"\n📅 Хугацаа: {start_date} - {end_date} ({days} хоног)"
-            leave_details += f"\n⏰ Цагийн тоо: {inactive_hours} цаг"
-            # leave_details += f"\n💭 Шалтгаан: {reason}"
+            # Teams-д зөв харагдах форматтай мессеж - олон аргаар оролдох
+            leave_details = f"\\n📅 Хугацаа: {start_date} - {end_date}"
+            leave_details += f"\\n⏰ Цаг: {inactive_hours} цаг"
+            # leave_details += f"\\n💭 Шалтгаан: {reason}"
         
         # Орлон ажиллах хүний мэдээлэл нэмэх
         if replacement_worker_name:
-            message = f"{requester_name} чөлөө авсан шүү, манайхаан.{leave_details}\n🔄 Орлон ажиллах: {replacement_worker_name}"
+            message = f"**{requester_name}** чөлөө авсан шүү, манайхаан.{leave_details}\\n🔄 **Орлон ажиллах:** {replacement_worker_name}"
         else:
-            message = f"{requester_name} чөлөө авсан шүү, манайхаан.{leave_details}"
+            message = f"**{requester_name}** чөлөө авсан шүү, манайхаан.{leave_details}"
         
-        # Teams webhook payload бэлтгэх
+        # Teams webhook payload бэлтгэх - Markdown форматтай
         payload = {
             "message": message
         }
