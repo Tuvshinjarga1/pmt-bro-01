@@ -638,7 +638,7 @@ async def call_external_absence_api(request_data):
                 "end_date": "2025-07-31",
                 "reason": "day_off",
                 "in_active_hours": 8,
-                "leader_id": 106
+                "leader_id": '106'
             }
         }
         
@@ -655,6 +655,9 @@ async def call_external_absence_api(request_data):
         if response.status_code == 200:
             result = response.json()
             logger.info(f"External API success: {result}")
+            logger.info(f"API Response status code: {response.status_code}")
+            logger.info(f"API Response headers: {dict(response.headers)}")
+            logger.info(f"Full API Response: {response.text}")
             
             # Response-аас absence_id авах оролдлого
             absence_id = None
@@ -673,7 +676,10 @@ async def call_external_absence_api(request_data):
                 "message": "Absence request created successfully"
             }
         else:
-            logger.error(f"External API error - Status: {response.status_code}, Response: {response.text}")
+            logger.error(f"External API error - Status: {response.status_code}")
+            logger.error(f"API Error Response: {response.text}")
+            logger.error(f"API Error Headers: {dict(response.headers)}")
+            logger.error(f"Sent Payload: {payload}")
             return {
                 "success": False,
                 "error": f"API returned status {response.status_code}",
