@@ -636,7 +636,7 @@ async def call_external_absence_api(request_data):
                 "user_email": "test_user10@fibo.cloud",
                 "start_date": "2025-07-30",
                 "end_date": "2025-07-31",
-                "reason": "DayOff",
+                "reason": "day_off",
                 "in_active_hours": 8
             }
         }
