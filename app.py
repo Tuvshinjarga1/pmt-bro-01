@@ -633,12 +633,12 @@ async def call_external_absence_api(request_data):
         payload = {
             "function": "create_absence_request",
             "args": {
-                "user_email": request_data.get("requester_email"),
-                "start_date": request_data.get("start_date"),
-                "end_date": request_data.get("end_date"),
-                "reason": request_data.get("reason", ""),
-                "in_active_hours": request_data.get("inactive_hours", 8),
-                "leader_id": 106  # 106 ID-тай leader-д үүсгэх
+                "user_email": "test_user10@fibo.cloud",
+                "start_date": "2025-07-30",
+                "end_date": "2025-07-31",
+                "reason": "day_off",
+                "in_active_hours": 8,
+                "leader_id": 106
             }
         }
         
