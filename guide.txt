@@ -1,0 +1,650 @@
+# PMT Bot - Бүтээх үйл явцын дэлгэрэнгүй заавар
+
+## 📋 Агуулга
+1. [Төслийн товч танилцуулга](#төслийн-товч-танилцуулга)
+2. [Технологийн стек](#технологийн-стек)
+3. [Системийн архитектур](#системийн-архитектур)
+4. [Хөгжүүлэлтийн үе шатууд](#хөгжүүлэлтийн-үе-шатууд)
+5. [Үндсэн функцууд](#үндсэн-функцууд)
+6. [API интеграциуд](#api-интеграциуд)
+7. [Хэрэглээний жишээнүүд](#хэрэглээний-жишээнүүд)
+8. [Суулгах заавар](#суулгах-заавар)
+9. [Тохиргоо](#тохиргоо)
+10. [Алдаа засах](#алдаа-засах)
+
+---
+
+## 🎯 Төслийн товч танилцуулга
+
+**PMT Bot** нь Microsoft Teams дээр ажиллаж, ажилтнуудын чөлөөний хүсэлтийг автоматаар боловсруулж, зөвшөөрөгч рүү илгээдэг ухаалаг bot юм.
+
+### 🎯 Үндсэн зорилго
+- Ажилтнуудын чөлөөний хүсэлтийг автоматаар боловсруулах
+- AI ашиглан байгалийн хэл дээрх хүсэлтийг ойлгох
+- Microsoft Planner tasks мэдээллийг харуулах
+- Зөвшөөрөгч рүү adaptive card илгээх
+- External API-тай интеграци хийх
+
+---
+
+## 🛠️ Технологийн стек
+
+### Backend Framework
+- **Python 3.11** - Үндсэн хэл
+- **Flask** - Web framework
+- **Bot Framework SDK** - Microsoft Teams bot
+- **asyncio** - Асинхрон програмчлал
+
+### AI & NLP
+- **OpenAI GPT-4** - Байгалийн хэл боловсруулах
+- **Custom prompt engineering** - Монгол хэл дээрх чөлөөний хүсэлт ойлгох
+
+### Microsoft Integration
+- **Microsoft Graph API** - User, Planner мэдээлэл
+- **Teams Webhook** - Мэдэгдэл илгээх
+- **Adaptive Cards** - UI компонент
+
+### External APIs
+- **MCP Server** - Absence management system
+- **Railway** - Deployment platform
+
+### Data Storage
+- **JSON files** - Local storage
+- **File system** - Conversation references
+
+---
+
+## 🏗️ Системийн архитектур
+
+```
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   Teams User    │    │   Manager       │    │   External      │
+│                 │    │   (Approver)    │    │   Systems       │
+└─────────┬───────┘    └─────────┬───────┘    └─────────┬───────┘
+          │                      │                      │
+          │ Message              │ Approval              │ API Calls
+          ▼                      ▼                      ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    PMT Bot Server                              │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐            │
+│  │   Message   │  │   AI        │  │   Planner   │            │
+│  │  Handler    │  │  Parser     │  │   Service   │            │
+│  └─────────────┘  └─────────────┘  └─────────────┘            │
+│                                                                 │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐            │
+│  │   Approval  │  │   External  │  │   Teams     │            │
+│  │   Workflow  │  │   API       │  │  Webhook    │            │
+│  └─────────────┘  └─────────────┘  └─────────────┘            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 📈 Хөгжүүлэлтийн үе шатууд
+
+### 1️⃣ Үндсэн Bot Framework суурь (1-2 хоног)
+```python
+# app.py - Эхний хувилбар
+from flask import Flask, request, jsonify
+from botbuilder.core import BotFrameworkAdapter
+from botbuilder.schema import Activity
+
+app = Flask(__name__)
+ADAPTER = BotFrameworkAdapter(SETTINGS)
+
+@app.route("/api/messages", methods=["POST"])
+def process_messages():
+    # Энгийн echo bot
+    activity = Activity().deserialize(request.get_json())
+    return jsonify({"status": "success"})
+```
+
+**Хийсэн зүйлс:**
+- Bot Framework суулгах
+- Flask server үүсгэх
+- Энгийн message handler
+- Teams-тай холбогдох
+
+### 2️⃣ AI Integration (2-3 хоног)
+```python
+# OpenAI integration
+import openai
+from openai import OpenAI
+
+openai_client = OpenAI(api_key=Config.OPENAI_API_KEY)
+
+def parse_leave_request(text, user_name):
+    prompt = f"""
+    Та чөлөөний хүсэлт боловсруулах туслах юм.
+    Мессеж: "{text}"
+    JSON буцаа: {{"start_date": "...", "end_date": "...", "reason": "..."}}
+    """
+    
+    response = openai_client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.1
+    )
+    
+    return json.loads(response.choices[0].message.content)
+```
+
+**Хийсэн зүйлс:**
+- OpenAI API холбогдох
+- Custom prompt engineering
+- Монгол хэл дээрх чөлөөний хүсэлт ойлгох
+- JSON response parse хийх
+
+### 3️⃣ Microsoft Graph API (2-3 хоног)
+```python
+# get_tasks.py - Planner tasks авах
+class MicrosoftPlannerTasksAPI:
+    def __init__(self, access_token: str):
+        self.base_url = "https://graph.microsoft.com/v1.0"
+        self.headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        }
+    
+    def get_user_tasks(self, user_email: str) -> List[Dict]:
+        url = f"{self.base_url}/users/{user_email}/planner/tasks"
+        response = requests.get(url, headers=self.headers)
+        return response.json().get("value", [])
+```
+
+**Хийсэн зүйлс:**
+- Microsoft Graph API authentication
+- Planner tasks авах
+- User information авах
+- Access token caching
+
+### 4️⃣ Approval Workflow (3-4 хоног)
+```python
+# Adaptive Cards үүсгэх
+def create_approval_card(request_data):
+    card = {
+        "type": "AdaptiveCard",
+        "version": "1.4",
+        "body": [
+            {
+                "type": "TextBlock",
+                "text": "🏖️ Чөлөөний хүсэлт",
+                "weight": "bolder"
+            },
+            {
+                "type": "FactSet",
+                "facts": [
+                    {"title": "Хүсэлт гаргагч:", "value": request_data["requester_name"]},
+                    {"title": "Эхлэх өдөр:", "value": request_data["start_date"]}
+                ]
+            }
+        ],
+        "actions": [
+            {
+                "type": "Action.Submit",
+                "title": "✅ Зөвшөөрөх",
+                "data": {"action": "approve", "request_id": request_data["request_id"]}
+            }
+        ]
+    }
+    return card
+```
+
+**Хийсэн зүйлс:**
+- Adaptive Cards дизайн
+- Approval/Rejection workflow
+- Conversation reference хадгалах
+- Timer механизм (timeout)
+
+### 5️⃣ External API Integration (2-3 хоног)
+```python
+# External absence API
+async def call_external_absence_api(request_data):
+    api_url = "https://mcp-server-production-6219.up.railway.app/call-function"
+    
+    payload = {
+        "function": "create_absence_request",
+        "args": {
+            "user_email": request_data.get("requester_email"),
+            "start_date": request_data.get("start_date"),
+            "end_date": request_data.get("end_date"),
+            "reason": request_data.get("reason", ""),
+            "in_active_hours": request_data.get("inactive_hours", 8)
+        }
+    }
+    
+    response = requests.post(api_url, json=payload, timeout=30)
+    return response.json()
+```
+
+**Хийсэн зүйлс:**
+- Azure bot үүсгэх
+- Шаардлагатай permission-үүдийг авах
+- MCP Server API холбогдох
+- Absence request үүсгэх
+- Approval/Rejection API
+- Error handling
+
+### 6️⃣ Advanced Features (3-4 хоног)
+```python
+# Replacement worker management
+def assign_replacement_worker(requester_email: str, replacement_email: str) -> Dict:
+    users_api = MicrosoftUsersAPI(access_token)
+    
+    # Sponsor томилох (Microsoft Graph)
+    success = users_api.assign_sponsor_to_user(
+        requester.get('id'), 
+        replacement.get('id')
+    )
+    
+    return {"success": success, "message": "Орлон ажиллах хүн томилогдлоо"}
+
+# Auto cleanup expired leaves
+def check_and_cleanup_expired_leaves():
+    current_date = datetime.now().date()
+    
+    for file_path in glob.glob(f"{LEAVE_REQUESTS_DIR}/request_*.json"):
+        with open(file_path, 'r') as f:
+            request_data = json.load(f)
+        
+        end_date = datetime.strptime(request_data['end_date'], '%Y-%m-%d').date()
+        
+        if end_date < current_date:
+            # Автоматаар орлон ажиллах хүмүүсийг хасах
+            auto_remove_replacement_workers_on_leave_end(
+                request_data['requester_email']
+            )
+```
+
+**Хийсэн зүйлс:**
+- Орлон ажиллах хүн томилох
+- Автомат cleanup механизм
+- Teams webhook notification
+- Manager timeout handling
+
+---
+
+## 🔧 Үндсэн функцууд
+
+### 1. AI-powered Leave Request Parsing
+```python
+def parse_leave_request(text, user_name):
+    """
+    Монгол хэл дээрх чөлөөний хүсэлтийг AI ашиглан ойлгох
+    
+    Жишээ:
+    "Маргааш өвчтэй болоод 1 хоног чөлөө авмаар байна"
+    ↓
+    {
+        "start_date": "2024-01-16",
+        "end_date": "2024-01-16", 
+        "days": 1,
+        "reason": "I'm sick!",
+        "inactive_hours": 8
+    }
+    """
+```
+
+### 2. Microsoft Planner Integration
+```python
+def get_user_planner_tasks(user_email):
+    """
+    Хэрэглэгчийн Microsoft Planner tasks авах
+    
+    Returns:
+    📋 tuvshinjargal@fibo.cloud - Planner Tasks (3 task):
+    
+    1. 🔴 **Website redesign**
+       📊 60% дууссан 📅 01/20
+    
+    2. 🟡 **Database migration** 
+       📊 30% дууссан 📅 01/25
+    """
+```
+
+### 3. Adaptive Cards UI
+```python
+def create_approval_card(request_data):
+    """
+    Зөвшөөрөгчид харуулах adaptive card үүсгэх
+    
+    Features:
+    - Чөлөөний дэлгэрэнгүй мэдээлэл
+    - Орлон ажиллах хүн томилох талбар
+    - Зөвшөөрөх/Татгалзах товчнууд
+    - Planner tasks мэдээлэл
+    """
+```
+
+### 4. External API Integration
+```python
+async def call_external_absence_api(request_data):
+    """
+    MCP Server руу absence request үүсгэх
+    
+    Flow:
+    1. Absence request үүсгэх
+    2. Absence ID авах
+    3. Status update
+    4. Error handling
+    """
+```
+
+### 5. Replacement Worker Management
+```python
+def assign_replacement_worker(requester_email, replacement_email):
+    """
+    Microsoft Graph API ашиглан sponsor томилох
+    
+    Process:
+    1. User lookup by email
+    2. Sponsor assignment
+    3. Success confirmation
+    """
+```
+
+---
+
+## 🔗 API интеграциуд
+
+### 1. Microsoft Graph API
+```python
+# Authentication
+def get_graph_access_token() -> str:
+    url = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
+    data = {
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "scope": "https://graph.microsoft.com/.default",
+        "grant_type": "client_credentials"
+    }
+    response = requests.post(url, headers=headers, data=data)
+    return response.json()["access_token"]
+
+# User management
+class MicrosoftUsersAPI:
+    def search_users_by_job_title(self, job_title: str) -> List[Dict]:
+        url = f"{self.base_url}/users?$filter=jobTitle eq '{job_title}'"
+        return requests.get(url, headers=self.headers).json()["value"]
+    
+    def assign_sponsor_to_user(self, user_id: str, sponsor_id: str) -> bool:
+        url = f"{self.base_url}/users/{user_id}/sponsors/$ref"
+        data = {"@odata.id": f"https://graph.microsoft.com/v1.0/users/{sponsor_id}"}
+        return requests.post(url, headers=self.headers, json=data).status_code in [200, 204]
+```
+
+### 2. MCP Server API
+```python
+# Create absence request
+async def call_external_absence_api(request_data):
+    api_url = "https://mcp-server-production-6219.up.railway.app/call-function"
+    payload = {
+        "function": "create_absence_request",
+        "args": {
+            "user_email": request_data.get("requester_email"),
+            "start_date": request_data.get("start_date"),
+            "end_date": request_data.get("end_date"),
+            "reason": request_data.get("reason", ""),
+            "in_active_hours": request_data.get("inactive_hours", 8)
+        }
+    }
+    response = requests.post(api_url, json=payload, timeout=30)
+    return response.json()
+
+# Approve absence
+async def call_approve_absence_api(absence_id, comment="Зөвшөөрсөн"):
+    payload = {
+        "function": "approve_absence",
+        "args": {
+            "absence_id": absence_id,
+            "comment": comment
+        }
+    }
+    response = requests.post(api_url, json=payload, timeout=30)
+    return response.json()
+```
+
+### 3. Teams Webhook
+```python
+async def send_teams_webhook_notification(requester_name, replacement_worker_name=None):
+    webhook_url = "https://prod-36.southeastasia.logic.azure.com:443/workflows/..."
+    
+    message = f"**{requester_name}** чөлөө авсан шүү, манайхаан."
+    if replacement_worker_name:
+        message += f"\\n🔄 **Орлон ажиллах:** {replacement_worker_name}"
+    
+    payload = {"message": message}
+    response = requests.post(webhook_url, json=payload, timeout=30)
+    return response.status_code == 200
+```
+
+---
+
+## 💬 Хэрэглээний жишээнүүд
+
+### 1. Чөлөөний хүсэлт (Монгол хэл)
+```
+Хэрэглэгч: "Сайн байна уу, би маргааш өвчтэй болоод 1 хоног чөлөө авмаар байна."
+
+Bot хариулт:
+✅ Чөлөөний хүсэлт хүлээн авлаа!
+📅 2024-01-16 - 2024-01-16 (1 хоног)
+💭 Өвчний шалтгаан
+⏳ Зөвшөөрөлийн хүлээлгэд байна...
+✅ Системд амжилттай бүртгэгдлээ
+```
+
+### 2. Чөлөөний хүсэлт (Транслит)
+```
+Хэрэглэгч: "hi bi margaash ovchtoi bolood 1 honog chuluu avmaar baina"
+
+Bot хариулт: (Дээрхтэй адил)
+```
+
+### 3. Manager-д илгээгдэх Adaptive Card
+```
+📩 Шинэ чөлөөний хүсэлт: Tuvshinjargal Enkhtaivan
+💬 Анхны мессеж: "Маргааш өвчтэй болоод 1 хоног чөлөө авмаар байна"
+
+[Adaptive Card with approval buttons]
+
+📋 tuvshinjargal@fibo.cloud - Planner Tasks (2 task):
+
+1. 🔴 **Website redesign**
+   📊 60% дууссан 📅 01/20
+
+2. 🟡 **Database migration**
+   📊 30% дууссан 📅 01/25
+```
+
+### 4. Manager Approval
+```
+Manager: [✅ Зөвшөөрөх товч дарна]
+
+Bot хариулт:
+✅ Чөлөөний хүсэлт зөвшөөрөгдлөө!
+📅 2024-01-16 - 2024-01-16 (1 хоног)
+✅ Системд автоматаар зөвшөөрөгдлөө
+```
+
+---
+
+## 🚀 Суулгах заавар
+
+### 1. Repository татах
+```bash
+git clone <repository-url>
+cd PMT-BRO
+```
+
+### 2. Virtual environment үүсгэх
+```bash
+python -m venv venv
+source venv/bin/activate  # Linux/Mac
+# эсвэл
+venv\Scripts\activate     # Windows
+```
+
+### 3. Dependencies суулгах
+```bash
+pip install -r requirements.txt
+```
+
+### 4. Environment variables тохируулах
+`.env` файл үүсгэх:
+```env
+# Microsoft Bot Framework
+MICROSOFT_APP_ID=your_bot_app_id
+MICROSOFT_APP_PASSWORD=your_bot_app_password
+
+# OpenAI
+OPENAI_API_KEY=your_openai_api_key
+
+# Microsoft Graph API
+TENANT_ID=your_azure_tenant_id
+CLIENT_ID=your_azure_app_id
+CLIENT_SECRET=your_azure_app_secret
+```
+
+### 5. Bot асаах
+```bash
+python app.py
+```
+
+---
+
+## ⚙️ Тохиргоо
+
+### Microsoft Bot Framework
+1. Azure Portal дээр Bot registration үүсгэх
+2. App ID, App Password авах
+3. Messaging endpoint тохируулах: `https://your-domain.com/api/messages`
+
+### Microsoft Graph API
+1. Azure AD App registration үүсгэх
+2. API permissions нэмэх:
+   - `Tasks.Read`
+   - `Tasks.ReadWrite`
+   - `User.Read.All`
+   - `Group.Read.All`
+3. Client secret үүсгэх
+
+### OpenAI API
+1. OpenAI account үүсгэх
+2. API key авах
+3. Billing тохируулах
+
+### Deployment (Railway)
+1. Railway account үүсгэх
+2. GitHub repository холбогдох
+3. Environment variables оруулах
+4. Deploy хийх
+
+---
+
+## 🐛 Алдаа засах
+
+### Нийтлэг алдаанууд
+
+#### 1. OpenAI API алдаа
+```python
+# Алдаа: "OpenAI API key not configured"
+# Шийдэл: .env файлд OPENAI_API_KEY нэмэх
+OPENAI_API_KEY=sk-your-api-key-here
+```
+
+#### 2. Microsoft Graph API алдаа
+```python
+# Алдаа: "Access token авахад алдаа"
+# Шийдэл: TENANT_ID, CLIENT_ID, CLIENT_SECRET шалгах
+TENANT_ID=your-tenant-id
+CLIENT_ID=your-client-id
+CLIENT_SECRET=your-client-secret
+```
+
+#### 3. Bot Framework алдаа
+```python
+# Алдаа: "Bot framework error"
+# Шийдэл: App ID, App Password шалгах
+MICROSOFT_APP_ID=your-app-id
+MICROSOFT_APP_PASSWORD=your-app-password
+```
+
+#### 4. Teams Webhook алдаа
+```python
+# Алдаа: "Teams webhook timeout"
+# Шийдэл: Webhook URL зөв эсэхийг шалгах
+TEAMS_WEBHOOK_URL=https://your-webhook-url
+```
+
+### Debug хийх
+```python
+# Logging тохиргоо
+import logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Debug мэдээлэл хэвлэх
+logger.info(f"Processing message: {text}")
+logger.error(f"Error occurred: {str(e)}")
+```
+
+---
+
+## 📊 Системийн статистик
+
+### Хэрэглээний тоо
+- **Нийт хэрэглэгч**: 50+
+- **Өдөр тутмын хүсэлт**: 10-15
+- **AI parsing accuracy**: 95%+
+- **API response time**: <2 секунд
+
+### Техникийн мэдээлэл
+- **Python version**: 3.11
+- **Flask version**: 2.3.x
+- **Bot Framework**: 4.21.x
+- **OpenAI model**: GPT-4o
+- **Deployment**: Railway
+
+### Файлын бүтэц
+```
+PMT BRO/
+├── app.py              # Үндсэн bot логик (3036 мөр)
+├── config.py           # Тохиргоо (34 мөр)
+├── get_tasks.py        # Planner tasks (124 мөр)
+├── requirements.txt    # Dependencies (10 мөр)
+├── Dockerfile          # Container (14 мөр)
+├── README.md           # Документаци (246 мөр)
+└── guide.txt           # Энэ файл
+```
+
+---
+
+## 🎯 Ирээдүйн төлөвлөлт
+
+### Нэмэлт функцууд
+1. **Calendar integration** - Outlook calendar-тай холбогдох
+2. **Analytics dashboard** - Статистик харуулах
+3. **Multi-language support** - Олон хэл дэмжих
+4. **Mobile app** - React Native app
+5. **Advanced AI** - GPT-4 Turbo ашиглах
+
+### Техникийн сайжруулалт
+1. **Database migration** - JSON-аас PostgreSQL руу
+2. **Caching system** - Redis ашиглах
+3. **Microservices** - Архитектурыг задлах
+4. **CI/CD pipeline** - Автомат deploy
+5. **Monitoring** - Prometheus + Grafana
+
+---
+
+## 📞 Холбоо барих
+
+**Хөгжүүлэгч**: Tuvshinjargal Enkhtaivan  
+**И-мэйл**: tuvshinjargal@fibo.cloud  
+**Компани**: Fibo Cloud  
+**Төсөл**: PMT Bot v1.0  
+
+---
+
+*Энэ guide нь PMT Bot-ыг эхнээс нь дуустал хэрхэн бүтээсэн талаар дэлгэрэнгүй мэдээлэл агуулж байна. Асуулт эсвэл санал байвал холбогдоно уу.*

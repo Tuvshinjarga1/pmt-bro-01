@@ -51,7 +51,7 @@ class MicrosoftPlannerTasksAPI:
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json"
         }
-
+    
     def get_user_tasks(self, user_email: str) -> List[Dict]:
         """Тодорхой хэрэглэгчийн бүх tasks авах"""
         url = f"{self.base_url}/users/{user_email}/planner/tasks"
