@@ -63,18 +63,11 @@ for directory in [CONVERSATION_DIR, LEAVE_REQUESTS_DIR, PENDING_CONFIRMATIONS_DI
     if not os.path.exists(directory):
         os.makedirs(directory)
 
-# Approval хийх хүний мэдээлэл (Fallback static values)
-APPROVER_EMAIL = "bulgantamir@fibo.cloud"
-APPROVER_USER_ID = "29:1oR0wAOz-uFvezPo6utf0ZQK9yeX34r6PHyWy0LMPKVvJccvzpy2nWKZPSEWEaV-poGyo004TMsQRBtor0YAQOw"
-
-# APPROVER_EMAIL = "bayarmunkh@fibo.cloud"
-# APPROVER_USER_ID = "29:1kIuFRh3SgMXCUqtZSJBjHDaDmVF7l2-zXmi3qZNRBokdrt8QxiwyVPutdFsMKMp1R-tF52PqrhmqHegty9X2JA"
-
 def get_dynamic_manager_id(requester_email: str) -> str:
     """Хэрэглэгчийн manager-ийн ID-г dynamic байдлаар авах"""
     if not LEADER_AVAILABLE:
-        logger.warning("Leader module not available, using static APPROVER_USER_ID")
-        return APPROVER_USER_ID
+        logger.warning("Leader module not available, cannot get manager ID")
+        return None
     
     try:
         manager_id = get_user_manager_id(requester_email)
@@ -82,11 +75,11 @@ def get_dynamic_manager_id(requester_email: str) -> str:
             logger.info(f"Found dynamic manager ID for {requester_email}: {manager_id}")
             return manager_id
         else:
-            logger.warning(f"No manager found for {requester_email}, using static APPROVER_USER_ID")
-            return APPROVER_USER_ID
+            logger.warning(f"No manager found for {requester_email}")
+            return None
     except Exception as e:
         logger.error(f"Error getting dynamic manager ID for {requester_email}: {str(e)}")
-        return APPROVER_USER_ID
+        return None
 
 def get_dynamic_manager_info(requester_email: str) -> Optional[Dict]:
     """Хэрэглэгчийн manager-ийн бүх мэдээллийг авах"""
@@ -1287,7 +1280,7 @@ async def handle_leave_request_message(context: TurnContext, text, user_id, user
             "status": parsed_data.get("status", "pending"),
             "original_message": text,
             "created_at": datetime.now().isoformat(),
-            "approver_email": manager_info.get("mail", APPROVER_EMAIL) if manager_info else APPROVER_EMAIL,
+            "approver_email": manager_info.get("mail") if manager_info else None,
             "approver_user_id": manager_id
         }
         
@@ -1299,7 +1292,7 @@ async def handle_leave_request_message(context: TurnContext, text, user_id, user
         
         # Manager руу adaptive card илгээх
         approval_card = create_approval_card(request_data)
-        approver_conversation = load_conversation_reference(manager_id)
+        approver_conversation = load_conversation_reference(manager_id) if manager_id else None
         
         # External API руу absence request үүсгэх
         api_result = await call_external_absence_api(request_data)
@@ -1366,10 +1359,10 @@ async def forward_message_to_admin(text, user_name, user_id):
             manager_id = get_dynamic_manager_id(requester_email)
             logger.info(f"Using dynamic manager ID for {requester_email}: {manager_id}")
         else:
-            manager_id = APPROVER_USER_ID
-            logger.warning("No requester email found, using static APPROVER_USER_ID")
+            manager_id = None
+            logger.warning("No requester email found, cannot get manager ID")
         
-        approver_conversation = load_conversation_reference(manager_id)
+        approver_conversation = load_conversation_reference(manager_id) if manager_id else None
         
         if approver_conversation:
             # Энгийн мессежээс чөлөөний хүсэлт үүсгэх
@@ -1423,8 +1416,8 @@ async def forward_message_to_admin(text, user_name, user_id):
                 "status": parsed_data.get("status", "pending"),
                 "original_message": text,
                 "created_at": datetime.now().isoformat(),
-                "approver_email": APPROVER_EMAIL,
-                "approver_user_id": APPROVER_USER_ID
+                "approver_email": None,
+                "approver_user_id": manager_id
             }
             
             # Хүсэлт хадгалах
@@ -1931,7 +1924,7 @@ def submit_leave_request():
             "inactive_hours": days * 8,  # 8 цагийн ажлын өдөр
             "status": "pending",
             "created_at": datetime.now().isoformat(),
-            "approver_email": manager_info.get("mail", APPROVER_EMAIL) if manager_info else APPROVER_EMAIL,
+            "approver_email": manager_info.get("mail") if manager_info else None,
             "approver_user_id": manager_id
         }
 
@@ -1958,7 +1951,7 @@ def submit_leave_request():
         approval_card = create_approval_card(request_data)
 
         # Approver руу adaptive card илгээх
-        approver_conversation = load_conversation_reference(manager_id)
+        approver_conversation = load_conversation_reference(manager_id) if manager_id else None
         if not approver_conversation:
             return jsonify({"error": f"Manager conversation reference not found for {manager_id}"}), 404
 
@@ -2072,9 +2065,8 @@ def process_messages():
                                     is_manager = True
                         except Exception as e:
                             logger.warning(f"Error checking if user is manager: {str(e)}")
-                            # Алдаа гарвал static APPROVER_USER_ID-тай харьцуулах
-                            if user_id == APPROVER_USER_ID:
-                                is_manager = True
+                            # Алдаа гарвал manager биш гэж үзэх
+                            is_manager = False
                         
                         if not is_manager:
                             # Хэрэв хэрэглэгчтэй pending confirmation байвал
@@ -3026,10 +3018,10 @@ async def send_approved_request_to_manager(request_data, original_message):
             manager_id = get_dynamic_manager_id(requester_email)
             logger.info(f"Using dynamic manager ID for {requester_email}: {manager_id}")
         else:
-            manager_id = APPROVER_USER_ID
-            logger.warning("No requester email found, using static APPROVER_USER_ID")
+            manager_id = None
+            logger.warning("No requester email found, cannot get manager ID")
         
-        approver_conversation = load_conversation_reference(manager_id)
+        approver_conversation = load_conversation_reference(manager_id) if manager_id else None
         
         if approver_conversation:
             # Adaptive card үүсгэх
@@ -3082,10 +3074,10 @@ async def send_cancellation_to_manager(request_data, original_message, cancellat
             manager_id = get_dynamic_manager_id(requester_email)
             logger.info(f"Using dynamic manager ID for {requester_email}: {manager_id}")
         else:
-            manager_id = APPROVER_USER_ID
-            logger.warning("No requester email found, using static APPROVER_USER_ID")
+            manager_id = None
+            logger.warning("No requester email found, cannot get manager ID")
         
-        approver_conversation = load_conversation_reference(manager_id)
+        approver_conversation = load_conversation_reference(manager_id) if manager_id else None
         
         if approver_conversation:
             async def notify_manager_cancellation(ctx: TurnContext):
@@ -3166,7 +3158,7 @@ async def send_manager_timeout_to_hr(request_data):
 🕐 **Одоогийн цаг:** {datetime.now().strftime('%Y-%m-%d %H:%M')}
 
 🔔 **HR-ын үйлдэл:** Менежертэй холбогдож, хүсэлтийн талаар асууна уу.
-👨‍💼 **Менежер:** {APPROVER_EMAIL}{planner_info}"""
+👨‍💼 **Менежер:** {request_data.get('approver_email', 'N/A')}{planner_info}"""
         
         # HR Manager-уудад timeout мэдэгдэл илгээх
         for hr_manager in hr_managers:
