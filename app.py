@@ -611,7 +611,8 @@ def get_user_planner_tasks(user_email):
             return "📋 Planner-д идэвхтэй task олдсонгүй"
         
         # Tasks-ийн мэдээллийг форматлах
-        tasks_info = f"📋 **{user_email} - Planner Tasks ({len(tasks)} task):**\n\n"
+        tasks_info = f"📋 **{user_email} - Planner Tasks:**\n\n"
+        # tasks_info = f"📋 **{user_email} - Planner Tasks ({len(tasks)} task):**\n\n"
         
         # Зөвхөн идэвхтэй (дуусаагүй) tasks харуулах
         active_tasks = [task for task in tasks if task.get('percentComplete', 0) < 100]
