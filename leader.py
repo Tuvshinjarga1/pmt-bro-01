@@ -1,7 +1,12 @@
 import requests
 import time
+import os
 from typing import Dict, List, Optional
-from config import CLIENT_ID, CLIENT_SECRET, TENANT_ID
+
+# Environment variables-аас унших
+CLIENT_ID = os.getenv("CLIENT_ID", "a6e958a7-e8df-4e83-a8c2-5dc73f93bdc4")
+CLIENT_SECRET = os.getenv("CLIENT_SECRET")
+TENANT_ID = os.getenv("TENANT_ID", "3fee1c11-7cdf-44b4-a1b0-5183408e1d89")
 
 # ---------------- GLOBAL VARIABLES ----------------
 _cached_token = None
