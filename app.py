@@ -680,7 +680,7 @@ async def call_external_absence_api(request_data):
                 "user_email": "test_user10@fibo.cloud",
                 "start_date": request_data.get("start_date"),
                 "end_date": request_data.get("end_date"),
-                "reason": "day_off",
+                "reason": request_data.get("reason", "day_off"),
                 "in_active_hours": request_data.get("inactive_hours", 8)
             }
         }
@@ -1048,14 +1048,24 @@ type Absence struct {{
 - "ӨГЛӨӨний ЦАГ" эсвэл "ӨГЛӨӨ" = 4 цаг
 - "ҮДЭЭС ХОЙШ" эсвэл "ҮДИЙН ЦАГ" = 4 цаг
 
+ШАЛТГААНЫ ДҮРЭМ:
+- Хувийн шалтгаанаар чөлөө авбал = "day_off"
+- Өвчтэй болон эмнэлгийн чөлөө авбал = "sick"
+- Хэрэв шалтгаан тодорхойгүй бол needs_clarification = true болгож "Чөлөө авах шалтгаан юу вэ?" асуулт нэмэх
+
 ОГНООНЫ ДҮРЭМ:
 - Хэрэв inactive_hours < 8 (цагийн чөлөө) бол start_date = end_date (тэр өдөр л)
 - Хэрэв inactive_hours >= 8 (хоногийн чөлөө) бол end_date = start_date + (хоногийн тоо - 1)
-- Хэрэв огноо тодорхойгүй бол тодорхой болж асуух
-- Хэрэв цаг/хоног тодорхойгүй бол 8 цаг (1 хоног) гэж үзэх
-- Хэрэв шалтгаан байхгүй бол "Хувийн шаардлага" гэж үзэх
+- Хэрэв огноо тодорхойгүй бол needs_clarification = true болгож "Хэзээ чөлөө авах вэ?" асуулт нэмэх
+- Хэрэв цаг/хоног тодорхойгүй бол needs_clarification = true болгож "Хэдэн хоног эсвэл цаг чөлөө авах вэ?" асуулт нэмэх
 - Status үргэлж "pending" байна
-- Хэрэв мэдээлэл дутуу бол needs_clarification = true болгож асуултууд нэмэх
+
+НЭМЭЛТ МЭДЭЭЛЭЛ ШААРДЛАГАТАЙ ҮЕИЙН ДҮРЭМ:
+- Хэрэв огноо тодорхойгүй бол needs_clarification = true
+- Хэрэв цаг/хоног тодорхойгүй бол needs_clarification = true  
+- Хэрэв шалтгаан тодорхойгүй бол needs_clarification = true
+- Хэрэв мэдээлэл дутуу бол needs_clarification = true болгож холбогдох асуултууд нэмэх
+- Асуултуудыг монгол хэл дээр, энгийн, ойлгомжтой байдлаар бичэх
 
 ӨНӨӨДРИЙН ОГНОО ({today_str})-ийг үндэслэн тооцоол хийнэ үү!
 
@@ -1089,7 +1099,7 @@ JSON буцаа:
                 if not parsed_data.get('start_date'):
                     parsed_data['start_date'] = today.strftime("%Y-%m-%d")
                 if not parsed_data.get('reason'):
-                    parsed_data['reason'] = "Хувийн шаардлага"
+                    parsed_data['reason'] = "day_off"
                 if not parsed_data.get('status'):
                     parsed_data['status'] = "pending"
                 if not parsed_data.get('inactive_hours'):
@@ -1143,6 +1153,10 @@ def parse_leave_request_simple(text, user_name):
     # Цаг ба хоногийн тоо олох
     text_lower = text.lower()
     
+    # Мэдээлэл дутуу эсэхийг шалгах
+    needs_clarification = False
+    questions = []
+    
     # Цагийн тоо шалгах
     hours_match = re.search(r'(\d+)\s*(?:цаг|час|hour)', text_lower)
     
@@ -1164,11 +1178,17 @@ def parse_leave_request_simple(text, user_name):
         days = int(days_match.group(1))
         inactive_hours = days * 8
     else:
-        # Default - 1 хоног
+        # Цаг/хоног тодорхойгүй - асуух
+        needs_clarification = True
+        questions.append("Хэдэн хоног эсвэл цаг чөлөө авах вэ?")
+        # Default утгууд
         days = 1
         inactive_hours = 8
     
     # Start date тодорхойлох
+    date_keywords = ['маргааш', 'өнөөдөр', 'хоёр өдрийн дараа', 'гурав өдрийн дараа', '3 өдрийн дараа']
+    has_date_info = any(keyword in text_lower for keyword in date_keywords)
+    
     if 'маргааш' in text_lower:
         start_date_obj = today + timedelta(days=1)
     elif 'өнөөдөр' in text_lower:
@@ -1178,6 +1198,10 @@ def parse_leave_request_simple(text, user_name):
     elif 'гурав өдрийн дараа' in text_lower or '3 өдрийн дараа' in text_lower:
         start_date_obj = today + timedelta(days=3)
     else:
+        # Огноо тодорхойгүй - асуух
+        if not has_date_info:
+            needs_clarification = True
+            questions.append("Хэзээ чөлөө авах вэ? (өнөөдөр, маргааш, эсвэл тодорхой огноо)")
         # Default - өнөөдөр
         start_date_obj = today
     
@@ -1194,15 +1218,23 @@ def parse_leave_request_simple(text, user_name):
     end_date = end_date_obj.strftime("%Y-%m-%d")
     
     # Шалтгаан гаргах
-    reason_keywords = ['учир', 'шалтгаан', 'because', 'reason', 'for']
-    reason = "Хувийн шаардлага"
+    # Өвчний шалтгаан шалгах
+    sick_keywords = ['өвчтэй', 'өвчин', 'эмнэлэг', 'эмнэлгийн', 'sick', 'illness', 'hospital', 'medical', 'эрүүл мэнд', 'эрүүлмэнд']
+    is_sick_leave = any(keyword in text_lower for keyword in sick_keywords)
     
-    for keyword in reason_keywords:
-        if keyword in text.lower():
-            parts = text.lower().split(keyword)
-            if len(parts) > 1:
-                reason = parts[1].strip()[:100]  # Эхний 100 тэмдэгт
-                break
+    # Шалтгаан тодорхой эсэхийг шалгах
+    reason_keywords = ['учир', 'шалтгаан', 'because', 'reason', 'for', 'өвчтэй', 'өвчин', 'эмнэлэг', 'хувийн', 'амралт', 'чөлөө']
+    has_reason_info = any(keyword in text_lower for keyword in reason_keywords)
+    
+    if is_sick_leave:
+        reason = "sick"
+    elif has_reason_info:
+        reason = "day_off"  # Хувийн шалтгаан
+    else:
+        # Шалтгаан тодорхойгүй - асуух
+        needs_clarification = True
+        questions.append("Чөлөө авах шалтгаан юу вэ? (хувийн шалтгаан, өвчний чөлөө, эсвэл бусад)")
+        reason = "day_off"  # Default
     
     return {
         "requester_name": user_name,
@@ -1212,8 +1244,8 @@ def parse_leave_request_simple(text, user_name):
         "reason": reason,
         "inactive_hours": inactive_hours,
         "status": "pending",
-        "needs_clarification": False,
-        "questions": []
+        "needs_clarification": needs_clarification,
+        "questions": questions
     }
 
 async def handle_leave_request_message(context: TurnContext, text, user_id, user_name):
@@ -1866,7 +1898,7 @@ def submit_leave_request():
         start_date = data.get("start_date")
         end_date = data.get("end_date")
         days = data.get("days")
-        reason = data.get("reason", "Хувийн шаардлага")
+        reason = data.get("reason", "day_off")
 
         if not all([requester_email, start_date, end_date, days]):
             return jsonify({"error": "Missing required fields: requester_email, start_date, end_date, days"}), 400
