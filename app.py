@@ -2201,7 +2201,7 @@ def process_messages():
                                 "status": parsed_data.get("status", "pending"),
                                 "original_message": user_text,
                                 "created_at": datetime.now().isoformat(),
-                                "approver_email": manager_info.get("mail", APPROVER_EMAIL) if manager_info else APPROVER_EMAIL,
+                                "approver_email": manager_info.get("mail") if manager_info else None,
                                 "approver_user_id": manager_id
                             }
                             
