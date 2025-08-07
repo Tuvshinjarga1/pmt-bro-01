@@ -980,6 +980,57 @@ async def call_external_absence_api(request_data):
         #     }
         # }
         
+        # Хэрэглэгчийн анхны мессежээс шалтгааныг олж авах
+        original_message = request_data.get("original_message", "")
+        
+        # GPT model ашиглаж natural language ойлгох оролдлого
+        description = ""
+        if original_message and openai_client.api_key:
+            try:
+                # GPT-тэй шалтгааныг олж авах
+                prompt = f"""
+Доорх мессежээс чөлөөний шалтгааныг монгол хэлээр товч тайлбарлана уу:
+
+Мессеж: "{original_message}"
+
+Зөвхөн шалтгааныг монгол хэлээр бичээд буцаана уу (жишээ: "Өвчний чөлөө", "Хувийн шалтгаан", "Амралтын чөлөө" гэх мэт).
+"""
+
+                response = openai_client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {"role": "system", "content": "Та чөлөөний шалтгааныг ойлгож, монгол хэлээр товч тайлбарладаг туслах."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.1,
+                    max_tokens=50
+                )
+                
+                description = response.choices[0].message.content.strip()
+                logger.info(f"GPT-ээс олж авсан шалтгаан: {description}")
+                
+            except Exception as e:
+                logger.warning(f"GPT-ээс шалтгаан олж авах боломжгүй: {str(e)}")
+                # Fallback - энгийн keyword check
+                text_lower = original_message.lower()
+                sick_keywords = ['өвчтэй', 'өвчин', 'эмнэлэг', 'эмнэлгийн', 'sick', 'illness', 'hospital', 'medical', 'эрүүл мэнд', 'эрүүлмэнд']
+                is_sick_leave = any(keyword in text_lower for keyword in sick_keywords)
+                
+                if is_sick_leave:
+                    description = "Өвчний чөлөө"
+                else:
+                    description = "Хувийн шалтгаан"
+        elif original_message:
+            # GPT ашиглах боломжгүй бол энгийн keyword check
+            text_lower = original_message.lower()
+            sick_keywords = ['өвчтэй', 'өвчин', 'эмнэлэг', 'эмнэлгийн', 'sick', 'illness', 'hospital', 'medical', 'эрүүл мэнд', 'эрүүлмэнд']
+            is_sick_leave = any(keyword in text_lower for keyword in sick_keywords)
+            
+            if is_sick_leave:
+                description = "Өвчний чөлөө"
+            else:
+                description = "Хувийн шалтгаан"
+        
         payload = {
             "function": "create_absence_request",
             "args": {
@@ -987,7 +1038,8 @@ async def call_external_absence_api(request_data):
                 "start_date": request_data.get("start_date"),
                 "end_date": request_data.get("end_date"),
                 "reason": request_data.get("reason", "day_off"),
-                "in_active_hours": request_data.get("inactive_hours", 8)
+                "in_active_hours": request_data.get("inactive_hours", 8),
+                "description": description
             }
         }
         
@@ -1196,8 +1248,8 @@ async def send_teams_webhook_notification(requester_name, replacement_worker_nam
             inactive_hours = request_data.get('inactive_hours', 'N/A')
             
             # Teams-д зөв харагдах форматтай мессеж - олон аргаар оролдох
-            leave_details = f"\\n📅 Хугацаа: {start_date} - {end_date}"
-            leave_details += f"\\n⏰ Цаг: {inactive_hours} цаг"
+            leave_details = f"📅 Хугацаа: {start_date} - {end_date}"
+            leave_details += f"⏰ Цаг: {inactive_hours} цаг"
             # leave_details += f"\\n💭 Шалтгаан: {reason}"
         
         # Таск шилжүүлэх мэдээлэл нэмэх
@@ -1207,9 +1259,9 @@ async def send_teams_webhook_notification(requester_name, replacement_worker_nam
         
         # Орлон ажиллах хүний мэдээлэл нэмэх
         if replacement_worker_name:
-            message = f"TEST: **{requester_name}** чөлөө авсан шүү, манайхаан.{leave_details}\\n🔄 **Орлон ажиллах:** {replacement_worker_name}{task_info}"
+            message = f"TEST: **{requester_name}** чөлөө авсан шүү, манайхаан.{leave_details} 🔄 **Орлон ажиллах:** {replacement_worker_name}{task_info}"
         else:
-            message = f"TEST:**{requester_name}** чөлөө авсан шүү, манайхаан.{leave_details}{task_info}"
+            message = f"TEST:**{requester_name}** чөлөө авсан шүү, манайхаан.{leave_details} 🔄 **Орлон ажиллах:** {replacement_worker_name}{task_info}"
         
         # Teams webhook payload бэлтгэх - Markdown форматтай
         payload = {
@@ -1419,6 +1471,7 @@ JSON буцаа:
                 
                 # Хуучин системтэй нийцүүлэх
                 parsed_data['requester_name'] = user_name
+                parsed_data['original_message'] = text
                 
                 # Хоногийн тоо зөв тооцоолох
                 inactive_hours = parsed_data.get('inactive_hours', 8)
@@ -1456,96 +1509,48 @@ JSON буцаа:
         return parse_leave_request_simple(text, user_name)
 
 def parse_leave_request_simple(text, user_name):
-    """Энгийн regex ашиглах fallback функц"""
+    """GPT model ашиглах fallback функц - keyword-based parsing багасгасан"""
     
     # Өнөөдрийн огноо олох
     today = datetime.now()
     
-    # Цаг ба хоногийн тоо олох
+    # GPT model ашиглаж natural language ойлгох оролдлого
+    try:
+        if openai_client.api_key:
+            # GPT-тэй холбогдох боломжтой бол түүнийг ашиглах
+            return parse_leave_request(text, user_name)
+    except Exception as e:
+        logger.warning(f"GPT model ашиглах боломжгүй, энгийн parsing ашиглана: {str(e)}")
+    
+    # Fallback - зөвхөн хамгийн энгийн regex ашиглах
     text_lower = text.lower()
     
     # Мэдээлэл дутуу эсэхийг шалгах
-    needs_clarification = False
-    questions = []
+    needs_clarification = True  # GPT ашиглахгүй бол үргэлж clarification шаардлагатай
+    questions = ["GPT model ашиглах боломжгүй байна. Дэлгэрэнгүй мэдээлэл өгнө үү."]
     
-    # Цагийн тоо шалгах
-    hours_match = re.search(r'(\d+)\s*(?:цаг|час|hour)', text_lower)
+    # Зөвхөн хамгийн энгийн тохиолдлуудыг шалгах
+    today = datetime.now()
     
-    # Хоногийн тоо шалгах
-    days_match = re.search(r'(\d+)\s*(?:хоног|өдөр|day)', text_lower)
+    # Default утгууд
+    days = 1
+    inactive_hours = 8
+    start_date_obj = today
+    reason = "day_off"
     
-    # Хагас хоног шалгах
-    half_day_patterns = ['хагас хоног', '0.5 хоног', 'хагас өдөр', 'өглөө', 'үдээс хойш', 'үдийн цаг']
-    is_half_day = any(pattern in text_lower for pattern in half_day_patterns)
-    
-    # Цагийн тоо тодорхойлох
-    if hours_match:
-        inactive_hours = int(hours_match.group(1))
-        days = max(1, inactive_hours // 8) if inactive_hours >= 8 else 1  # Хамгийн багадаа 1 өдөр
-    elif is_half_day:
-        inactive_hours = 4
-        days = 1
-    elif days_match:
-        days = int(days_match.group(1))
-        inactive_hours = days * 8
-    else:
-        # Цаг/хоног тодорхойгүй - асуух
-        needs_clarification = True
-        questions.append("Хэдэн хоног эсвэл цаг чөлөө авах вэ?")
-        # Default утгууд
-        days = 1
-        inactive_hours = 8
-    
-    # Start date тодорхойлох
-    date_keywords = ['маргааш', 'өнөөдөр', 'хоёр өдрийн дараа', 'гурав өдрийн дараа', '3 өдрийн дараа']
-    has_date_info = any(keyword in text_lower for keyword in date_keywords)
-    
+    # Зөвхөн хамгийн тодорхой тохиолдлуудыг шалгах
     if 'маргааш' in text_lower:
         start_date_obj = today + timedelta(days=1)
-    elif 'өнөөдөр' in text_lower:
-        start_date_obj = today
-    elif 'хоёр өдрийн дараа' in text_lower:
-        start_date_obj = today + timedelta(days=2)
-    elif 'гурав өдрийн дараа' in text_lower or '3 өдрийн дараа' in text_lower:
-        start_date_obj = today + timedelta(days=3)
-    else:
-        # Огноо тодорхойгүй - асуух
-        if not has_date_info:
-            needs_clarification = True
-            questions.append("Хэзээ чөлөө авах вэ? (өнөөдөр, маргааш, эсвэл тодорхой огноо)")
-        # Default - өнөөдөр
-        start_date_obj = today
     
     start_date = start_date_obj.strftime("%Y-%m-%d")
     
-    # End date тооцоолох - ЗӨВХӨН days-аар тооцоолох
+    # End date тооцоолох
     if inactive_hours < 8:
-        # Цагийн чөлөө бол тэр өдөр л
         end_date_obj = start_date_obj
     else:
-        # Хоногийн чөлөө - эхлэх өдрөөс хэдэн хоног нэмэх
         end_date_obj = start_date_obj + timedelta(days=days-1)
     
     end_date = end_date_obj.strftime("%Y-%m-%d")
-    
-    # Шалтгаан гаргах
-    # Өвчний шалтгаан шалгах
-    sick_keywords = ['өвчтэй', 'өвчин', 'эмнэлэг', 'эмнэлгийн', 'sick', 'illness', 'hospital', 'medical', 'эрүүл мэнд', 'эрүүлмэнд']
-    is_sick_leave = any(keyword in text_lower for keyword in sick_keywords)
-    
-    # Шалтгаан тодорхой эсэхийг шалгах
-    reason_keywords = ['учир', 'шалтгаан', 'because', 'reason', 'for', 'өвчтэй', 'өвчин', 'эмнэлэг', 'хувийн', 'амралт', 'чөлөө']
-    has_reason_info = any(keyword in text_lower for keyword in reason_keywords)
-    
-    if is_sick_leave:
-        reason = "sick"
-    elif has_reason_info:
-        reason = "day_off"  # Хувийн шалтгаан
-    else:
-        # Шалтгаан тодорхойгүй - асуух
-        needs_clarification = True
-        questions.append("Чөлөө авах шалтгаан юу вэ? (хувийн шалтгаан, өвчний чөлөө, эсвэл бусад)")
-        reason = "day_off"  # Default
     
     return {
         "requester_name": user_name,
@@ -1556,7 +1561,8 @@ def parse_leave_request_simple(text, user_name):
         "inactive_hours": inactive_hours,
         "status": "pending",
         "needs_clarification": needs_clarification,
-        "questions": questions
+        "questions": questions,
+        "original_message": text
     }
 
 async def handle_leave_request_message(context: TurnContext, text, user_id, user_name):
@@ -2229,6 +2235,7 @@ def submit_leave_request():
         end_date = data.get("end_date")
         days = data.get("days")
         reason = data.get("reason", "day_off")
+        original_message = data.get("original_message", "")
 
         if not all([requester_email, start_date, end_date, days]):
             return jsonify({"error": "Missing required fields: requester_email, start_date, end_date, days"}), 400
@@ -2276,6 +2283,7 @@ def submit_leave_request():
             "reason": reason,
             "inactive_hours": days * 8,  # 8 цагийн ажлын өдөр
             "status": "pending",
+            "original_message": original_message,
             "created_at": datetime.now().isoformat(),
             "approver_email": manager_info.get("mail") if manager_info else None,
             "approver_user_id": manager_id
@@ -3425,7 +3433,8 @@ async def send_approved_request_to_manager(request_data, original_message):
                     replacement_info_for_manager = f"\n🔄 Орлон ажиллах хүн томилогдсон: {replacement_worker['email']}"
                 
                 message = MessageFactory.attachment(adaptive_card_attachment)
-                message.text = f"📨 Баталгаажсан чөлөөний хүсэлт: {request_data['requester_name']}\n💬 Анхны мессеж: \"{original_message}\"\n✅ Хэрэглэгч баталгаажуулсан{replacement_info_for_manager}{planner_info}"
+                # message.text = f"📨 Баталгаажсан чөлөөний хүсэлт: {request_data['requester_name']}\n💬 Анхны мессеж: \"{original_message}\"\n✅ Хэрэглэгч баталгаажуулсан{replacement_info_for_manager}{planner_info}"
+                message.text = f"📨 Чөлөөний хүсэлт"
                 await ctx.send_activity(message)
             
             await ADAPTER.continue_conversation(
