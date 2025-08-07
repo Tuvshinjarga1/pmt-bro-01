@@ -47,6 +47,14 @@ except ImportError:
     JOBTITLE_AVAILABLE = False
     logging.warning("jobtitle module not found. CEO lookup disabled.")
 
+# All_user.py-аас бүх хэрэглэгчдийн мэдээлэл авах функцүүд import хийх
+try:
+    from all_user import get_access_token, MicrosoftUsersAPI as AllUsersAPI
+    ALL_USERS_AVAILABLE = True
+except ImportError:
+    ALL_USERS_AVAILABLE = False
+    logging.warning("all_user module not found. All users lookup disabled.")
+
 # Logging тохиргоо
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -833,6 +841,48 @@ def get_hr_managers() -> List[Dict]:
         logger.error(f"HR Manager-уудыг олоход алдаа: {str(e)}")
         return []
 
+def get_all_users_choices():
+    """Бүх хэрэглэгчдийн жагсаалтыг ChoiceSet-д зориулж форматлах"""
+    if not ALL_USERS_AVAILABLE:
+        logger.warning("All users module not available")
+        return []
+    
+    try:
+        # Access token авах
+        token = get_access_token()
+        if not token:
+            logger.error("Access token авч чадсангүй")
+            return []
+        
+        # Бүх хэрэглэгчдийн мэдээлэл авах
+        users_api = AllUsersAPI(token)
+        users = users_api.get_all_users()
+        
+        # ChoiceSet-д зориулж форматлах
+        choices = []
+        for user in users:
+            name = user.get("displayName", "Нэргүй")
+            email = user.get("mail") or user.get("userPrincipalName", "")
+            job_title = user.get("jobTitle", "")
+            department = user.get("department", "")
+            
+            # Хэрэглэгчийн мэдээллийг title-д харуулах
+            title = f"{name} - {job_title}"
+            if department:
+                title += f" ({department})"
+            
+            choices.append({
+                "title": title,
+                "value": email
+            })
+        
+        logger.info(f"Бүх хэрэглэгчдийн жагсаалт бэлтгэгдлээ: {len(choices)} хэрэглэгч")
+        return choices
+        
+    except Exception as e:
+        logger.error(f"Хэрэглэгчдийн жагсаалт авахад алдаа: {str(e)}")
+        return []
+
 def create_approval_card(request_data):
     """Approval-ын тулд adaptive card үүсгэх - tasks-уудтай"""
     
@@ -975,9 +1025,10 @@ def create_approval_card(request_data):
                 "spacing": "medium"
             },
             {
-                "type": "Input.Text",
+                "type": "Input.ChoiceSet",
                 "id": "replacement_email",
-                "placeholder": "example@fibo.cloud - Орлон ажиллах хүний и-мэйл (заавал биш)",
+                "placeholder": "Орлон ажиллах хүнийг сонгоно уу...",
+                "choices": get_all_users_choices(),
                 "isRequired": False
             }
         ],
