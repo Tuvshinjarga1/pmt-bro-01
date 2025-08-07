@@ -11,12 +11,17 @@ from datetime import datetime, timedelta
 import uuid
 import openai
 from openai import OpenAI
-from config import Config
 import requests
 import threading
 import time
 from typing import Dict, List, Optional
 from urllib.parse import quote
+
+# Assign planner import
+from assign_planner import TaskAssignmentManager, get_cached_access_token
+
+# Config import
+from config import Config
 
 # Microsoft Planner tasks авах
 try:
@@ -33,6 +38,14 @@ try:
 except ImportError:
     LEADER_AVAILABLE = False
     logging.warning("leader module not found. Dynamic manager lookup disabled.")
+
+# Jobtitle.py-аас CEO олох функцүүд import хийх
+try:
+    from jobtitle import MicrosoftUsersAPI as JobTitleAPI
+    JOBTITLE_AVAILABLE = True
+except ImportError:
+    JOBTITLE_AVAILABLE = False
+    logging.warning("jobtitle module not found. CEO lookup disabled.")
 
 # Logging тохиргоо
 logging.basicConfig(level=logging.INFO)
@@ -97,6 +110,193 @@ def get_dynamic_manager_info(requester_email: str) -> Optional[Dict]:
             return None
     except Exception as e:
         logger.error(f"Error getting dynamic manager info for {requester_email}: {str(e)}")
+        return None
+
+def get_available_manager_id(requester_email: str, leave_days: int = 0) -> Optional[str]:
+    """Чөлөөний хугацаанаас хамааран тохирох manager-ийг олох функц"""
+    if not LEADER_AVAILABLE:
+        logger.warning("Leader module not available, cannot get available manager")
+        return None
+    
+    try:
+        # Чөлөөний хугацаанаас хамааран manager тодорхойлох
+        if leave_days >= 4:
+            # 4 хоног ба түүнээс дээш бол CEO руу илгээх
+            logger.info(f"Leave days: {leave_days} >= 4, sending to CEO")
+            ceo_info = get_ceo_info()
+            if ceo_info:
+                ceo_email = ceo_info.get('mail')
+                if ceo_email:
+                    # CEO-ийн conversation ID олох
+                    ceo_user_id = get_ceo_conversation_id(ceo_email)
+                    if ceo_user_id:
+                        logger.info(f"Found CEO user ID: {ceo_user_id}")
+                        return ceo_user_id
+                    else:
+                        logger.warning(f"CEO conversation ID not found for {ceo_email}")
+                        # CEO-ийн conversation ID олдохгүй бол CEO-ийн ID-г буцаах
+                        return ceo_info.get('id')
+                else:
+                    logger.warning("CEO email not found")
+            else:
+                logger.warning("CEO not found, falling back to regular manager")
+        
+        # 3 хоног ба түүнээс доош бол эхлээд хэрэглэгчийн manager-ийг олох
+        logger.info(f"Leave days: {leave_days} < 4, sending to regular manager")
+        manager_info = get_user_manager_info(requester_email)
+        if not manager_info:
+            logger.warning(f"No manager found for {requester_email}")
+            return None
+        
+        manager_email = manager_info.get('mail')
+        if not manager_email:
+            logger.warning(f"No email found for manager of {requester_email}")
+            return None
+        
+        # Manager-ийн чөлөөний статусыг шалгах
+        manager_leave_status = check_manager_leave_status(manager_email)
+        
+        if manager_leave_status.get('is_on_leave', False):
+            logger.info(f"Manager {manager_email} is on leave, checking their manager")
+            
+            # Manager-ийн manager-ийг олох
+            manager_manager_info = get_user_manager_info(manager_email)
+            if manager_manager_info:
+                logger.info(f"Found manager's manager: {manager_manager_info.get('displayName', 'Unknown')}")
+                return manager_manager_info.get('id')
+            else:
+                logger.warning(f"No manager found for manager {manager_email}")
+                return None
+        else:
+            # Manager чөлөө авсангүй байна
+            logger.info(f"Manager {manager_email} is available")
+            return manager_info.get('id')
+            
+    except Exception as e:
+        logger.error(f"Error getting available manager for {requester_email}: {str(e)}")
+        return None
+
+def check_manager_leave_status(manager_email: str) -> Dict:
+    """Manager-ийн чөлөөний статусыг шалгах"""
+    try:
+        # Хадгалагдсан leave request файлуудаас шалгах
+        if os.path.exists(LEAVE_REQUESTS_DIR):
+            current_date = datetime.now().date()
+            
+            for filename in os.listdir(LEAVE_REQUESTS_DIR):
+                if filename.startswith("request_") and filename.endswith(".json"):
+                    file_path = os.path.join(LEAVE_REQUESTS_DIR, filename)
+                    
+                    try:
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            request_data = json.load(f)
+                        
+                        # Энэ manager-ийн чөлөөний хүсэлт эсэхийг шалгах
+                        if (request_data.get('requester_email') == manager_email and 
+                            request_data.get('status') == 'approved'):
+                            
+                            start_date = datetime.strptime(request_data.get('start_date'), '%Y-%m-%d').date()
+                            end_date = datetime.strptime(request_data.get('end_date'), '%Y-%m-%d').date()
+                            
+                            # Чөлөөний хугацаанд байгаа эсэхийг шалгах
+                            if start_date <= current_date <= end_date:
+                                return {
+                                    'is_on_leave': True,
+                                    'start_date': request_data.get('start_date'),
+                                    'end_date': request_data.get('end_date'),
+                                    'reason': request_data.get('reason'),
+                                    'request_id': request_data.get('request_id')
+                                }
+                    except Exception as e:
+                        logger.error(f"Error reading leave request file {filename}: {str(e)}")
+                        continue
+        
+        # Чөлөө авсангүй байна
+        return {'is_on_leave': False}
+        
+    except Exception as e:
+        logger.error(f"Error checking manager leave status for {manager_email}: {str(e)}")
+        return {'is_on_leave': False}
+
+def get_ceo_info() -> Optional[Dict]:
+    """CEO-ийн мэдээллийг авах"""
+    if not JOBTITLE_AVAILABLE:
+        logger.warning("Jobtitle module not available, cannot get CEO info")
+        return None
+    
+    try:
+        # Microsoft Graph access token авах
+        access_token = get_graph_access_token()
+        if not access_token:
+            logger.error("Microsoft Graph access token авч чадсангүй")
+            return None
+        
+        # JobTitleAPI ашиглаж CEO хайх
+        job_api = JobTitleAPI(access_token)
+        
+        # CEO-г хайх (олон нэрээр оролдох)
+        ceo_titles = [
+            "Chief Executive Officer",
+            "CEO",
+            "Гүйцэтгэх захирал",
+            "Ерөнхий захирал"
+        ]
+        
+        for title in ceo_titles:
+            ceo_users = job_api.search_users_by_job_title(title)
+            if ceo_users:
+                # Зөвхөн идэвхтэй хэрэглэгчдийг шүүх
+                active_ceo = [user for user in ceo_users if user.get('accountEnabled', True)]
+                if active_ceo:
+                    ceo = active_ceo[0]  # Эхний CEO-г авах
+                    logger.info(f"Found CEO: {ceo.get('displayName')} ({ceo.get('mail')})")
+                    return ceo
+        
+        # Хэрэв тодорхой нэрээр олдохгүй бол хэсэгчилсэн хайлт хийх
+        for title in ["CEO", "Chief", "Гүйцэтгэх", "Ерөнхий"]:
+            ceo_users = job_api.search_users_by_partial_job_title(title)
+            if ceo_users:
+                active_ceo = [user for user in ceo_users if user.get('accountEnabled', True)]
+                if active_ceo:
+                    ceo = active_ceo[0]
+                    logger.info(f"Found CEO by partial search: {ceo.get('displayName')} ({ceo.get('mail')})")
+                    return ceo
+        
+        logger.warning("CEO олдсонгүй")
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error getting CEO info: {str(e)}")
+        return None
+
+def get_ceo_conversation_id(ceo_email: str) -> Optional[str]:
+    """CEO-ийн и-мэйлээр conversation ID олох"""
+    try:
+        # Хадгалагдсан хэрэглэгчдийн файлуудаас CEO-г хайх
+        if os.path.exists(CONVERSATION_DIR):
+            for filename in os.listdir(CONVERSATION_DIR):
+                if filename.startswith("user_") and filename.endswith(".json"):
+                    file_path = os.path.join(CONVERSATION_DIR, filename)
+                    
+                    try:
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            user_info = json.load(f)
+                        
+                        # CEO-ийн и-мэйлтэй таарч байгаа эсэхийг шалгах
+                        if user_info.get('email') == ceo_email:
+                            user_id = user_info.get('user_id')
+                            if user_id:
+                                logger.info(f"Found CEO conversation ID: {user_id}")
+                                return user_id
+                    except Exception as e:
+                        logger.error(f"Error reading user file {filename}: {str(e)}")
+                        continue
+        
+        logger.warning(f"CEO conversation ID not found for email: {ceo_email}")
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error getting CEO conversation ID: {str(e)}")
         return None
 
 # Timeout механизм - 30 минут = 1800 секунд
@@ -198,6 +398,22 @@ class MicrosoftUsersAPI:
             logger.error(f"Microsoft Graph API и-мэйлээр хэрэглэгч олоход алдаа: {str(e)}")
             return None
 
+    def get_user_by_id(self, user_id: str) -> Optional[Dict]:
+        """ID-аар хэрэглэгч олох"""
+        try:
+            url = f"{self.base_url}/users/{user_id}?$select=id,displayName,mail,jobTitle,department,accountEnabled"
+            
+            response = requests.get(url, headers=self.headers)
+            
+            if response.status_code != 200:
+                logger.error(f"Microsoft Graph API ID-аар хэрэглэгч олоход алдаа: {response.status_code} - {response.text}")
+                return None
+            
+            return response.json()
+        except Exception as e:
+            logger.error(f"Microsoft Graph API ID-аар хэрэглэгч олоход алдаа: {str(e)}")
+            return None
+
     def assign_sponsor_to_user(self, user_id: str, sponsor_id: str) -> bool:
         """Guest user-д sponsor (орлон ажиллах хүн) томилох"""
         try:
@@ -288,9 +504,26 @@ def assign_replacement_worker(requester_email: str, replacement_email: str) -> D
         
         if success:
             logger.info(f"Орлон ажиллах хүн томилогдлоо: {requester_email} -> {replacement_email}")
+            
+            # Таскуудыг sponsor дээр шилжүүлэх
+            task_transfer_message = ""
+            try:
+                task_manager = TaskAssignmentManager(get_cached_access_token())
+                transfer_result = task_manager.transfer_all_tasks(requester_email, replacement_email)
+                
+                if transfer_result:
+                    task_transfer_message = "Таскууд амжилттай шилжүүлэгдлээ"
+                    logger.info(f"Таскууд шилжүүлэгдлээ: {requester_email} -> {replacement_email}")
+                else:
+                    task_transfer_message = "Таск шилжүүлэхэд алдаа гарлаа эсвэл шилжүүлэх таск байхгүй"
+                    logger.warning(f"Таск шилжүүлэхэд алдаа: {requester_email} -> {replacement_email}")
+            except Exception as task_error:
+                task_transfer_message = f"Таск шилжүүлэхэд алдаа гарлаа: {str(task_error)}"
+                logger.error(f"Таск шилжүүлэх алдаа: {str(task_error)}")
+            
             return {
                 "success": True,
-                "message": "Орлон ажиллах хүн амжилттай томилогдлоо",
+                "message": f"Орлон ажиллах хүн амжилттай томилогдлоо. {task_transfer_message}",
                 "requester": {
                     "id": requester.get('id'),
                     "name": requester.get('displayName'),
@@ -300,7 +533,8 @@ def assign_replacement_worker(requester_email: str, replacement_email: str) -> D
                     "id": replacement.get('id'),
                     "name": replacement.get('displayName'),
                     "email": replacement.get('mail')
-                }
+                },
+                "task_transfer": task_transfer_message
             }
         else:
             return {"success": False, "message": "Sponsor томилоход алдаа гарлаа"}
@@ -333,9 +567,26 @@ def remove_replacement_worker(requester_email: str, replacement_email: str) -> D
         
         if success:
             logger.info(f"Орлон ажиллах хүн хасагдлаа: {requester_email} -> {replacement_email}")
+            
+            # Таскуудыг эх хэрэглэгч рүү буцаан шилжүүлэх
+            task_transfer_message = ""
+            try:
+                task_manager = TaskAssignmentManager(get_cached_access_token())
+                transfer_result = task_manager.transfer_all_tasks(replacement_email, requester_email)
+                
+                if transfer_result:
+                    task_transfer_message = "Таскууд эх хэрэглэгч рүү буцаан шилжүүлэгдлээ"
+                    logger.info(f"Таскууд буцаан шилжүүлэгдлээ: {replacement_email} -> {requester_email}")
+                else:
+                    task_transfer_message = "Таск буцаан шилжүүлэхэд алдаа гарлаа эсвэл шилжүүлэх таск байхгүй"
+                    logger.warning(f"Таск буцаан шилжүүлэхэд алдаа: {replacement_email} -> {requester_email}")
+            except Exception as task_error:
+                task_transfer_message = f"Таск буцаан шилжүүлэхэд алдаа гарлаа: {str(task_error)}"
+                logger.error(f"Таск буцаан шилжүүлэх алдаа: {str(task_error)}")
+            
             return {
                 "success": True,
-                "message": "Орлон ажиллах хүн амжилттай хасагдлаа",
+                "message": f"Орлон ажиллах хүн амжилттай хасагдлаа. {task_transfer_message}",
                 "requester": {
                     "id": requester.get('id'),
                     "name": requester.get('displayName'),
@@ -345,7 +596,8 @@ def remove_replacement_worker(requester_email: str, replacement_email: str) -> D
                     "id": replacement.get('id'),
                     "name": replacement.get('displayName'),
                     "email": replacement.get('mail')
-                }
+                },
+                "task_transfer": task_transfer_message
             }
         else:
             return {"success": False, "message": "Sponsor хасахад алдаа гарлаа"}
@@ -409,6 +661,7 @@ def auto_remove_replacement_workers_on_leave_end(requester_email: str) -> Dict:
         
         removed_count = 0
         errors = []
+        task_transfer_messages = []
         
         # Бүх орлон ажиллах хүмүүсийг хасах
         for replacement in replacement_workers:
@@ -416,15 +669,25 @@ def auto_remove_replacement_workers_on_leave_end(requester_email: str) -> Dict:
             if remove_result["success"]:
                 removed_count += 1
                 logger.info(f"Автомат хасагдлаа: {replacement['name']} ({replacement['email']})")
+                
+                # Таск шилжүүлэх мэдээллийг нэмэх
+                if "task_transfer" in remove_result:
+                    task_transfer_messages.append(f"{replacement['name']}: {remove_result['task_transfer']}")
             else:
                 errors.append(f"{replacement['name']}: {remove_result['message']}")
         
+        # Таск шилжүүлэх мэдээллийг нэгтгэх
+        task_summary = ""
+        if task_transfer_messages:
+            task_summary = " Таск шилжүүлэлт: " + "; ".join(task_transfer_messages)
+        
         return {
             "success": True,
-            "message": f"{removed_count} орлон ажиллах хүн автоматаар хасагдлаа",
+            "message": f"{removed_count} орлон ажиллах хүн автоматаар хасагдлаа{task_summary}",
             "removed_count": removed_count,
             "total_count": len(replacement_workers),
-            "errors": errors
+            "errors": errors,
+            "task_transfers": task_transfer_messages
         }
         
     except Exception as e:
@@ -640,7 +903,7 @@ def get_user_planner_tasks(user_email):
             progress_text = f"{progress}%" if progress > 0 else "0%"
             
             tasks_info += f"{i}. {priority_emoji} **{title}**\n"
-            tasks_info += f"   📊 {progress_text} дууссан{due_text}\n\n"
+            # tasks_info += f"   📊 {progress_text} дууссан{due_text}\n\n"
         
         if len(active_tasks) > 5:
             tasks_info += f"... болон {len(active_tasks) - 5} бусад task\n"
@@ -869,7 +1132,7 @@ async def call_reject_absence_api(absence_id, comment=""):
             "message": str(e)
         }
     
-async def send_teams_webhook_notification(requester_name, replacement_worker_name=None, request_data=None):
+async def send_teams_webhook_notification(requester_name, replacement_worker_name=None, request_data=None, task_transfer_info=None):
     """Teams webhook руу зөвшөөрөлийн мэдэгдэл илгээх"""
     try:
         webhook_url = "https://prod-36.southeastasia.logic.azure.com:443/workflows/6dcb3cbe39124404a12b754720b25699/triggers/manual/paths/invoke?api-version=2016-06-01&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=nhqRPaYSLixFlWOePwBHVlyWrbAv6OL7h0SNclMZS0U"
@@ -888,11 +1151,16 @@ async def send_teams_webhook_notification(requester_name, replacement_worker_nam
             leave_details += f"\\n⏰ Цаг: {inactive_hours} цаг"
             # leave_details += f"\\n💭 Шалтгаан: {reason}"
         
+        # Таск шилжүүлэх мэдээлэл нэмэх
+        task_info = ""
+        if task_transfer_info:
+            task_info = f"\\n📋 **Таск шилжүүлэлт:** {task_transfer_info}"
+        
         # Орлон ажиллах хүний мэдээлэл нэмэх
         if replacement_worker_name:
-            message = f"TEST: **{requester_name}** чөлөө авсан шүү, манайхаан.{leave_details}\\n🔄 **Орлон ажиллах:** {replacement_worker_name}"
+            message = f"TEST: **{requester_name}** чөлөө авсан шүү, манайхаан.{leave_details}\\n🔄 **Орлон ажиллах:** {replacement_worker_name}{task_info}"
         else:
-            message = f"TEST:**{requester_name}** чөлөө авсан шүү, манайхаан.{leave_details}"
+            message = f"TEST:**{requester_name}** чөлөө авсан шүү, манайхаан.{leave_details}{task_info}"
         
         # Teams webhook payload бэлтгэх - Markdown форматтай
         payload = {
@@ -1263,10 +1531,27 @@ async def handle_leave_request_message(context: TurnContext, text, user_id, user
         request_id = str(uuid.uuid4())
         
         # Хүсэлтийн мэдээлэл бэлтгэх
-        # Dynamic manager ID авах
+        # Dynamic manager ID авах - чөлөөний хугацаанаас хамааран тохирох manager-ийг олох
         requester_email = requester_info.get("email")
-        manager_id = get_dynamic_manager_id(requester_email)
-        manager_info = get_dynamic_manager_info(requester_email)
+        leave_days = parsed_data.get("days", 1)  # Чөлөөний хоногийн тоо
+        manager_id = get_available_manager_id(requester_email, leave_days)
+        
+        # Manager-ийн мэдээллийг авах
+        if manager_id:
+            # Manager ID-аар manager-ийн мэдээллийг олох
+            manager_info = None
+            try:
+                # Microsoft Graph API ашиглаж manager-ийн мэдээллийг авах
+                access_token = get_graph_access_token()
+                if access_token:
+                    users_api = MicrosoftUsersAPI(access_token)
+                    # Manager ID-аар хэрэглэгч олох
+                    manager_info = users_api.get_user_by_id(manager_id)
+            except Exception as e:
+                logger.error(f"Error getting manager info by ID {manager_id}: {str(e)}")
+                manager_info = None
+        else:
+            manager_info = None
         
         request_data = {
             "request_id": request_id,
@@ -1354,11 +1639,13 @@ async def forward_message_to_admin(text, user_name, user_id):
                 requester_info = user
                 break
         
-        # Dynamic manager ID авах
+        # Dynamic manager ID авах - чөлөөний хугацаанаас хамааран тохирох manager-ийг олох
         requester_email = requester_info.get("email") if requester_info else None
         if requester_email:
-            manager_id = get_dynamic_manager_id(requester_email)
-            logger.info(f"Using dynamic manager ID for {requester_email}: {manager_id}")
+            # Энэ функц нь ердийн мессеж тул чөлөөний хоногийн тоог тодорхойлохгүй
+            # Default 1 хоног гэж үзэж manager руу илгээнэ
+            manager_id = get_available_manager_id(requester_email, 1)
+            logger.info(f"Using available manager ID for {requester_email}: {manager_id}")
         else:
             manager_id = None
             logger.warning("No requester email found, cannot get manager ID")
@@ -1907,9 +2194,25 @@ def submit_leave_request():
         if not requester_info:
             return jsonify({"error": f"User with email {requester_email} not found"}), 404
 
-        # Dynamic manager ID авах
-        manager_id = get_dynamic_manager_id(requester_email)
-        manager_info = get_dynamic_manager_info(requester_email)
+        # Dynamic manager ID авах - чөлөөний хугацаанаас хамааран тохирох manager-ийг олох
+        manager_id = get_available_manager_id(requester_email, days)
+        
+        # Manager-ийн мэдээллийг авах
+        if manager_id:
+            # Manager ID-аар manager-ийн мэдээллийг олох
+            manager_info = None
+            try:
+                # Microsoft Graph API ашиглаж manager-ийн мэдээллийг авах
+                access_token = get_graph_access_token()
+                if access_token:
+                    users_api = MicrosoftUsersAPI(access_token)
+                    # Manager ID-аар хэрэглэгч олох
+                    manager_info = users_api.get_user_by_id(manager_id)
+            except Exception as e:
+                logger.error(f"Error getting manager info by ID {manager_id}: {str(e)}")
+                manager_info = None
+        else:
+            manager_info = None
         
         # Хүсэлтийн мэдээлэл бэлтгэх
         request_id = str(uuid.uuid4())
@@ -2060,8 +2363,9 @@ def process_messages():
                                     break
                             
                             if requester_info and requester_info.get("email"):
-                                # Энэ хэрэглэгчийн manager-ийг олох
-                                manager_id = get_dynamic_manager_id(requester_info["email"])
+                                # Энэ хэрэглэгчийн manager-ийг олох - чөлөөний хугацаанаас хамааран тохирох manager-ийг олох
+                                # Default 1 хоног гэж үзэж manager шалгах
+                                manager_id = get_available_manager_id(requester_info["email"], 1)
                                 if manager_id == user_id:
                                     is_manager = True
                         except Exception as e:
@@ -2184,10 +2488,27 @@ def process_messages():
                                     requester_info = user
                                     break
                             
-                            # Dynamic manager ID авах
+                            # Dynamic manager ID авах - чөлөөний хугацаанаас хамааран тохирох manager-ийг олох
                             requester_email = requester_info.get("email") if requester_info else "unknown@fibo.cloud"
-                            manager_id = get_dynamic_manager_id(requester_email)
-                            manager_info = get_dynamic_manager_info(requester_email)
+                            leave_days = parsed_data.get("days", 1)  # Чөлөөний хоногийн тоо
+                            manager_id = get_available_manager_id(requester_email, leave_days)
+                            
+                            # Manager-ийн мэдээллийг авах
+                            if manager_id:
+                                # Manager ID-аар manager-ийн мэдээллийг олох
+                                manager_info = None
+                                try:
+                                    # Microsoft Graph API ашиглаж manager-ийн мэдээллийг авах
+                                    access_token = get_graph_access_token()
+                                    if access_token:
+                                        users_api = MicrosoftUsersAPI(access_token)
+                                        # Manager ID-аар хэрэглэгч олох
+                                        manager_info = users_api.get_user_by_id(manager_id)
+                                except Exception as e:
+                                    logger.error(f"Error getting manager info by ID {manager_id}: {str(e)}")
+                                    manager_info = None
+                            else:
+                                manager_info = None
                             
                             request_data = {
                                 "request_id": request_id,
@@ -2461,13 +2782,18 @@ async def handle_adaptive_card_action(context: TurnContext, action_data):
             
             # Teams webhook руу мэдэгдэл илгээх (орлон ажиллах хүний мэдээлэлтэй)
             replacement_worker_name = None
+            task_transfer_info = None
             if replacement_result and replacement_result["success"]:
                 replacement_worker_name = replacement_result['replacement']['name']
+                # Таск шилжүүлэх мэдээллийг авах
+                if "task_transfer" in replacement_result:
+                    task_transfer_info = replacement_result["task_transfer"]
             
             webhook_result = await send_teams_webhook_notification(
                 request_data["requester_name"], 
                 replacement_worker_name,
-                request_data
+                request_data,
+                task_transfer_info
             )
             webhook_status_msg = ""
             if webhook_result["success"]:
@@ -2500,12 +2826,16 @@ async def handle_adaptive_card_action(context: TurnContext, action_data):
                     
                     # Орлон ажиллах хүний мэдээлэл нэмэх
                     replacement_info = ""
+                    task_transfer_info = ""
                     if replacement_result and replacement_result["success"]:
                         replacement_info = f"\n🔄 Орлон ажиллах хүн: {replacement_result['replacement']['name']} ({replacement_result['replacement']['email']})"
+                        # Таск шилжүүлэх мэдээллийг нэмэх
+                        if "task_transfer" in replacement_result:
+                            task_transfer_info = f"\n📋 Таск шилжүүлэлт: {replacement_result['task_transfer']}"
                     elif replacement_email and replacement_result and not replacement_result["success"]:
                         replacement_info = f"\n⚠️ Орлон ажиллах хүн томилоход алдаа: {replacement_result['message']}"
                     
-                    await ctx.send_activity(f"🎉 Таны чөлөөний хүсэлт зөвшөөрөгдлөө!\n📅 {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног)\n✨ Сайхан амраарай!{approval_status_msg}{webhook_status_msg}{replacement_info}")
+                    await ctx.send_activity(f"🎉 Таны чөлөөний хүсэлт зөвшөөрөгдлөө!\n📅 {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног)\n✨ Сайхан амраарай!{approval_status_msg}{webhook_status_msg}{replacement_info}{task_transfer_info}")
 
                 await ADAPTER.continue_conversation(
                     requester_conversation,
@@ -2983,7 +3313,7 @@ def create_confirmation_message(parsed_data, user_email=None):
     """Баталгаажуулалтын мессеж үүсгэх"""
     timeout_minutes = CONFIRMATION_TIMEOUT_SECONDS // 60  # Секундээс минут руу хөрвүүлэх
     
-    message = f"""🔍 Таны чөлөөний хүсэлтээс дараах мэдээллийг олж авлаа:
+    message = f"""Таны чөлөөний хүсэлт:
 
 📅 **Эхлэх огноо:** {parsed_data.get('start_date')}
 📅 **Дуусах огноо:** {parsed_data.get('end_date')}  
@@ -2995,8 +3325,7 @@ def create_confirmation_message(parsed_data, user_email=None):
 
 💬 Хариулна уу:
 • **"Тийм"** эсвэл **"Үгүй"**
-
-⏰ **Анхаарах:** {timeout_minutes} минутын дотор хариулахгүй бол процесс дахин эхлэнэ."""
+"""
     
     # Planner tasks мэдээлэл нэмэх
     if user_email and PLANNER_AVAILABLE:
@@ -3011,11 +3340,12 @@ def create_confirmation_message(parsed_data, user_email=None):
 async def send_approved_request_to_manager(request_data, original_message):
     """Баталгаажуулсан чөлөөний хүсэлтийг менежер руу илгээх"""
     try:
-        # Dynamic manager ID авах
+        # Dynamic manager ID авах - чөлөөний хугацаанаас хамааран тохирох manager-ийг олох
         requester_email = request_data.get('requester_email')
         if requester_email:
-            manager_id = get_dynamic_manager_id(requester_email)
-            logger.info(f"Using dynamic manager ID for {requester_email}: {manager_id}")
+            leave_days = request_data.get('days', 1)  # Чөлөөний хоногийн тоо
+            manager_id = get_available_manager_id(requester_email, leave_days)
+            logger.info(f"Using available manager ID for {requester_email}: {manager_id}")
         else:
             manager_id = None
             logger.warning("No requester email found, cannot get manager ID")
@@ -3067,11 +3397,12 @@ async def send_approved_request_to_manager(request_data, original_message):
 async def send_cancellation_to_manager(request_data, original_message, cancellation_api_result=None):
     """Цуцалсан чөлөөний хүсэлтийг менежер руу мэдэгдэх"""
     try:
-        # Dynamic manager ID авах
+        # Dynamic manager ID авах - чөлөөний хугацаанаас хамааран тохирох manager-ийг олох
         requester_email = request_data.get('requester_email')
         if requester_email:
-            manager_id = get_dynamic_manager_id(requester_email)
-            logger.info(f"Using dynamic manager ID for {requester_email}: {manager_id}")
+            leave_days = request_data.get('days', 1)  # Чөлөөний хоногийн тоо
+            manager_id = get_available_manager_id(requester_email, leave_days)
+            logger.info(f"Using available manager ID for {requester_email}: {manager_id}")
         else:
             manager_id = None
             logger.warning("No requester email found, cannot get manager ID")

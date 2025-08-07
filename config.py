@@ -17,7 +17,7 @@ class Config:
     APP_PASSWORD = os.environ.get("BOT_PASSWORD", "")
     APP_TYPE = os.environ.get("BOT_TYPE", "")
     APP_TENANTID = os.environ.get("BOT_TENANT_ID", "")
-    OPENAI_API_KEY = os.environ["OPENAI_API_KEY"] # OpenAI API key
+    OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "") # OpenAI API key
     OPENAI_MODEL_NAME='gpt-4' # OpenAI model name. You can use any other model name from OpenAI.
     
     # Microsoft Graph API credentials
