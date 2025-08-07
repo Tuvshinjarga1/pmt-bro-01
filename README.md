@@ -196,6 +196,12 @@ Bot Framework Activity объект хүлээн авч боловсруулна
 - CEO-г `jobtitle.py` ашиглаж "Chief Executive Officer", "CEO", "Гүйцэтгэх захирал" гэх мэт нэрээр хайна
 - CEO-ийн conversation ID-г `conversations/` folder-аас и-мэйлээр хайж олно
 
+**Manager conversation ID олох логик:**
+
+- Manager-ийн и-мэйлээр `conversations/` folder-аас user_id хайж олно
+- Хэрэв олдохгүй бол manager-ийн Microsoft Graph ID-г ашиглана
+- Энэ нь manager bot-тай холбогдож байгаа эсэхийг шалгана
+
 ### ⏰ Manager Timeout Механизм
 
 - Manager-д чөлөөний хүсэлт илгээгдсэний дараа 2 цагийн timeout эхлэнэ

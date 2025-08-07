@@ -162,15 +162,34 @@ def get_available_manager_id(requester_email: str, leave_days: int = 0) -> Optio
             # Manager-ийн manager-ийг олох
             manager_manager_info = get_user_manager_info(manager_email)
             if manager_manager_info:
-                logger.info(f"Found manager's manager: {manager_manager_info.get('displayName', 'Unknown')}")
-                return manager_manager_info.get('id')
+                manager_manager_email = manager_manager_info.get('mail')
+                if manager_manager_email:
+                    # Manager-ийн manager-ийн conversation ID олох
+                    manager_manager_user_id = get_manager_conversation_id_by_email(manager_manager_email)
+                    if manager_manager_user_id:
+                        logger.info(f"Found manager's manager conversation ID: {manager_manager_user_id}")
+                        return manager_manager_user_id
+                    else:
+                        logger.warning(f"Manager's manager conversation ID not found for {manager_manager_email}")
+                        return manager_manager_info.get('id')
+                else:
+                    logger.warning(f"No email found for manager's manager")
+                    return manager_manager_info.get('id')
             else:
                 logger.warning(f"No manager found for manager {manager_email}")
                 return None
         else:
             # Manager чөлөө авсангүй байна
             logger.info(f"Manager {manager_email} is available")
-            return manager_info.get('id')
+            
+            # Manager-ийн conversation ID олох
+            manager_user_id = get_manager_conversation_id_by_email(manager_email)
+            if manager_user_id:
+                logger.info(f"Found manager conversation ID: {manager_user_id}")
+                return manager_user_id
+            else:
+                logger.warning(f"Manager conversation ID not found for {manager_email}, using manager ID")
+                return manager_info.get('id')
             
     except Exception as e:
         logger.error(f"Error getting available manager for {requester_email}: {str(e)}")
@@ -297,6 +316,36 @@ def get_ceo_conversation_id(ceo_email: str) -> Optional[str]:
         
     except Exception as e:
         logger.error(f"Error getting CEO conversation ID: {str(e)}")
+        return None
+
+def get_manager_conversation_id_by_email(manager_email: str) -> Optional[str]:
+    """Manager-ийн и-мэйлээр conversation ID олох"""
+    try:
+        # Хадгалагдсан хэрэглэгчдийн файлуудаас manager-г хайх
+        if os.path.exists(CONVERSATION_DIR):
+            for filename in os.listdir(CONVERSATION_DIR):
+                if filename.startswith("user_") and filename.endswith(".json"):
+                    file_path = os.path.join(CONVERSATION_DIR, filename)
+                    
+                    try:
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            user_info = json.load(f)
+                        
+                        # Manager-ийн и-мэйлтэй таарч байгаа эсэхийг шалгах
+                        if user_info.get('email') == manager_email:
+                            user_id = user_info.get('user_id')
+                            if user_id:
+                                logger.info(f"Found manager conversation ID by email: {user_id} for {manager_email}")
+                                return user_id
+                    except Exception as e:
+                        logger.error(f"Error reading user file {filename}: {str(e)}")
+                        continue
+        
+        logger.warning(f"Manager conversation ID not found for email: {manager_email}")
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error getting manager conversation ID by email: {str(e)}")
         return None
 
 # Timeout механизм - 30 минут = 1800 секунд
