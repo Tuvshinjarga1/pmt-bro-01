@@ -868,8 +868,8 @@ def get_all_users_choices():
             
             # Хэрэглэгчийн мэдээллийг title-д харуулах
             title = f"{name} - {job_title}"
-            if department:
-                title += f" ({department})"
+            # if department:
+            #     title += f" ({department})"
             
             choices.append({
                 "title": title,
