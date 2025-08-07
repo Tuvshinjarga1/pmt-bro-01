@@ -743,7 +743,7 @@ def auto_remove_replacement_workers_on_leave_end(requester_email: str) -> Dict:
         logger.error(f"Автомат орлон ажиллах хүн хасахад алдаа: {str(e)}")
         return {"success": False, "message": str(e)}
 
-def check_and_cleanup_expired_leaves():
+async def check_and_cleanup_expired_leaves():
     """Дууссан чөлөөний орлон ажиллах хүмүүсийг автоматаар цэвэрлэх"""
     try:
         from datetime import datetime
@@ -779,6 +779,12 @@ def check_and_cleanup_expired_leaves():
                         
                         # Орлон ажиллах хүмүүсийг автомат хасах
                         result = auto_remove_replacement_workers_on_leave_end(requester_email)
+                        
+                        # Чөлөө дуусахад таскуудыг автоматаар unassign хийх
+                        task_unassign_result = await unassign_tasks_on_leave_end(requester_email)
+                        if task_unassign_result:
+                            result["task_unassign"] = task_unassign_result
+                        
                         cleanup_results.append({
                             "requester_email": requester_email,
                             "end_date": end_date_str,
@@ -828,7 +834,98 @@ def get_hr_managers() -> List[Dict]:
         return []
 
 def create_approval_card(request_data):
-    """Approval-ын тулд adaptive card үүсгэх"""
+    """Approval-ын тулд adaptive card үүсгэх - tasks-уудтай"""
+    
+    # Хэрэглэгчийн tasks авах
+    requester_email = request_data.get("requester_email")
+    tasks_section = []
+    
+    if requester_email and PLANNER_AVAILABLE:
+        try:
+            token = get_access_token()
+            planner_api = MicrosoftPlannerTasksAPI(token)
+            tasks = planner_api.get_user_tasks(requester_email)
+            
+            if tasks:
+                # Зөвхөн идэвхтэй (дуусаагүй) tasks харуулах
+                active_tasks = [task for task in tasks if task.get('percentComplete', 0) < 100]
+                
+                if active_tasks:
+                    # Tasks хэсэг нэмэх
+                    tasks_section.extend([
+                        {
+                            "type": "TextBlock",
+                            "text": "📋 **Дутуу даалгаврууд (орлон ажиллах хүнд шилжүүлэх):**",
+                            "wrap": True,
+                            "weight": "bolder",
+                            "spacing": "medium"
+                        }
+                    ])
+                    
+                    # Зөвхөн эхний 5 tasks харуулах
+                    for i, task in enumerate(active_tasks[:5], 1):
+                        title = task.get('title', 'Нэргүй task')
+                        task_id = task.get('id', '')
+                        priority = task.get('priority', 'normal')
+                        
+                        # Due date форматлах
+                        due_date = task.get('dueDateTime')
+                        due_text = ""
+                        if due_date:
+                            try:
+                                dt = datetime.fromisoformat(due_date.replace('Z', '+00:00'))
+                                due_text = f" 📅 {dt.strftime('%m/%d')}"
+                            except:
+                                due_text = f" 📅 {due_date[:10]}"
+                        
+                        priority_emoji = "🔴" if priority == "urgent" else "🟡" if priority == "important" else "🔵"
+                        
+                        tasks_section.append({
+                            "type": "Input.Toggle",
+                            "id": f"task_{task_id}",
+                            "title": f"{i}. {priority_emoji} {title}{due_text}",
+                            "value": "false",
+                            "valueOn": "true",
+                            "valueOff": "false"
+                        })
+                    
+                    if len(active_tasks) > 5:
+                        tasks_section.append({
+                            "type": "TextBlock",
+                            "text": f"... болон {len(active_tasks) - 5} бусад task",
+                            "isSubtle": True,
+                            "spacing": "small"
+                        })
+                else:
+                    tasks_section.append({
+                        "type": "TextBlock",
+                        "text": "📋 Дутуу даалгавар олдсонгүй",
+                        "isSubtle": True,
+                        "spacing": "medium"
+                    })
+            else:
+                tasks_section.append({
+                    "type": "TextBlock",
+                    "text": "📋 Planner tasks олдсонгүй",
+                    "isSubtle": True,
+                    "spacing": "medium"
+                })
+        except Exception as e:
+            logger.error(f"Failed to get tasks for approval card: {str(e)}")
+            tasks_section.append({
+                "type": "TextBlock",
+                "text": f"📋 Tasks авахад алдаа: {str(e)}",
+                "isSubtle": True,
+                "spacing": "medium"
+            })
+    else:
+        tasks_section.append({
+            "type": "TextBlock",
+            "text": "📋 Planner модуль идэвхгүй байна",
+            "isSubtle": True,
+            "spacing": "medium"
+        })
+    
     card = {
         "type": "AdaptiveCard",
         "version": "1.4",
@@ -868,7 +965,8 @@ def create_approval_card(request_data):
                         "value": request_data.get("reason", "Тодорхойгүй")
                     }
                 ]
-            },
+            }
+        ] + tasks_section + [
             {
                 "type": "TextBlock",
                 "text": "🔄 **Орлон ажиллах хүн томилох (сонголттой):**",
@@ -2211,7 +2309,9 @@ def auto_remove_replacement_workers_endpoint():
 def cleanup_expired_leaves_endpoint():
     """Дууссан чөлөөний орлон ажиллах хүмүүсийг цэвэрлэх API"""
     try:
-        result = check_and_cleanup_expired_leaves()
+        # Async функцийг sync context-д дуудах
+        import asyncio
+        result = asyncio.run(check_and_cleanup_expired_leaves())
         
         if result["success"]:
             return jsonify(result), 200
@@ -2795,11 +2895,20 @@ async def handle_adaptive_card_action(context: TurnContext, action_data):
             # Орлон ажиллах хүний мэдээлэл авах (adaptive card-аас)
             replacement_email = None
             replacement_result = None
+            selected_task_ids = []
+            
             if hasattr(context.activity, 'value') and context.activity.value:
                 replacement_email = context.activity.value.get('replacement_email', '').strip()
                 
+                # Сонгогдсон таскуудыг авах
+                for key, value in context.activity.value.items():
+                    if key.startswith("task_") and value == "true":
+                        selected_task_ids.append(key)
+                
                 if replacement_email:
                     logger.info(f"Орлон ажиллах хүний и-мэйл оруулсан: {replacement_email}")
+                    logger.info(f"Сонгогдсон таскууд: {selected_task_ids}")
+                    
                     # Орлон ажиллах хүн томилох
                     replacement_result = assign_replacement_worker(
                         request_data.get('requester_email', ''), 
@@ -2813,6 +2922,17 @@ async def handle_adaptive_card_action(context: TurnContext, action_data):
                             "assigned_at": datetime.now().isoformat(),
                             "assigned_by": context.activity.from_property.id
                         }
+                        
+                        # Сонгогдсон таскуудыг sponsor дээр assign хийх
+                        if selected_task_ids:
+                            task_assign_result = await assign_selected_tasks_to_sponsor(
+                                request_data.get('requester_email', ''), 
+                                replacement_email, 
+                                selected_task_ids,
+                                request_data  # Чөлөөний хугацааны мэдээллийг дамжуулах
+                            )
+                            replacement_result["task_assign"] = task_assign_result
+                            logger.info(f"Task assign result: {task_assign_result}")
                     else:
                         logger.error(f"Орлон ажиллах хүн томилоход алдаа: {replacement_result['message']}")
                 else:
@@ -2843,7 +2963,17 @@ async def handle_adaptive_card_action(context: TurnContext, action_data):
             if replacement_result and replacement_result["success"]:
                 replacement_worker_name = replacement_result['replacement']['name']
                 # Таск шилжүүлэх мэдээллийг авах
-                if "task_transfer" in replacement_result:
+                if "task_assign" in replacement_result:
+                    task_assign = replacement_result["task_assign"]
+                    if task_assign.get("success"):
+                        task_transfer_info = f"{task_assign['success_count']} таск шилжүүлэгдлээ"
+                        # Чөлөөний хугацааны мэдээлэл нэмэх
+                        if task_assign.get("leave_duration_seconds"):
+                            leave_days = task_assign["leave_duration_seconds"] // (24 * 3600)
+                            task_transfer_info += f" (чөлөөний хугацаанд: {leave_days} хоног)"
+                    else:
+                        task_transfer_info = f"Таск шилжүүлэхэд алдаа: {task_assign.get('message', 'Unknown error')}"
+                elif "task_transfer" in replacement_result:
                     task_transfer_info = replacement_result["task_transfer"]
             
             webhook_result = await send_teams_webhook_notification(
@@ -2887,7 +3017,17 @@ async def handle_adaptive_card_action(context: TurnContext, action_data):
                     if replacement_result and replacement_result["success"]:
                         replacement_info = f"\n🔄 Орлон ажиллах хүн: {replacement_result['replacement']['name']} ({replacement_result['replacement']['email']})"
                         # Таск шилжүүлэх мэдээллийг нэмэх
-                        if "task_transfer" in replacement_result:
+                        if "task_assign" in replacement_result:
+                            task_assign = replacement_result["task_assign"]
+                            if task_assign.get("success"):
+                                task_transfer_info = f"\n📋 {task_assign['success_count']} таск орлон ажиллах хүнд шилжүүлэгдлээ"
+                                # Чөлөөний хугацааны мэдээлэл нэмэх
+                                if task_assign.get("leave_duration_seconds"):
+                                    leave_days = task_assign["leave_duration_seconds"] // (24 * 3600)
+                                    task_transfer_info += f" (чөлөөний хугацаанд: {leave_days} хоног)"
+                            else:
+                                task_transfer_info = f"\n⚠️ Таск шилжүүлэхэд алдаа: {task_assign.get('message', 'Unknown error')}"
+                        elif "task_transfer" in replacement_result:
                             task_transfer_info = f"\n📋 Таск шилжүүлэлт: {replacement_result['task_transfer']}"
                     elif replacement_email and replacement_result and not replacement_result["success"]:
                         replacement_info = f"\n⚠️ Орлон ажиллах хүн томилоход алдаа: {replacement_result['message']}"
@@ -3561,6 +3701,164 @@ async def send_manager_timeout_to_hr(request_data):
     except Exception as e:
         logger.error(f"Error sending manager timeout notification to HR: {str(e)}")
 
+async def assign_selected_tasks_to_sponsor(requester_email: str, sponsor_email: str, selected_task_ids: List[str], request_data: Dict = None) -> Dict:
+    """Сонгогдсон таскуудыг sponsor дээр assign хийх - чөлөөний хугацаанд л"""
+    try:
+        if not PLANNER_AVAILABLE:
+            return {"success": False, "message": "Planner модуль идэвхгүй байна"}
+        
+        # Access token авах
+        token = get_access_token()
+        if not token:
+            return {"success": False, "message": "Access token авч чадсангүй"}
+        
+        # Task assignment manager үүсгэх
+        task_manager = TaskAssignmentManager(token)
+        
+        # Хэрэглэгчдийг олох
+        requester_user = task_manager.users_api.search_user_by_email(requester_email)
+        if not requester_user:
+            return {"success": False, "message": f"Чөлөө авсан хүн олдсонгүй: {requester_email}"}
+        
+        sponsor_user = task_manager.users_api.search_user_by_email(sponsor_email)
+        if not sponsor_user:
+            return {"success": False, "message": f"Sponsor олдсонгүй: {sponsor_email}"}
+        
+        # Чөлөөний хугацааг тооцоолох
+        leave_duration_seconds = None
+        if request_data:
+            start_date = datetime.strptime(request_data.get('start_date'), '%Y-%m-%d')
+            end_date = datetime.strptime(request_data.get('end_date'), '%Y-%m-%d')
+            # Чөлөөний хугацааг секундээр тооцоолох (хугацаа дуусахад + 1 өдөр)
+            leave_duration_seconds = (end_date - start_date).days * 24 * 3600 + 24 * 3600  # +1 өдөр
+        
+        # Сонгогдсон таскуудыг assign хийх
+        success_count = 0
+        failed_tasks = []
+        assigned_tasks = []
+        
+        for task_id in selected_task_ids:
+            try:
+                # Task ID-г цэвэрлэх (task_ prefix арилгах)
+                clean_task_id = task_id.replace("task_", "")
+                
+                # Таскыг sponsor дээр assign хийх
+                if task_manager.assign_task_to_user(clean_task_id, sponsor_user.get('id')):
+                    success_count += 1
+                    assigned_tasks.append(clean_task_id)
+                    logger.info(f"Task {clean_task_id} амжилттай assign хийгдлээ: {requester_email} -> {sponsor_email}")
+                    
+                    # Хэрэв чөлөөний хугацаа тодорхой бол автомат unassign тохируулах
+                    if leave_duration_seconds:
+                        # Чөлөөний хугацаа дуусахад автоматаар unassign хийх
+                        task_manager.auto_unassign_after_delay(clean_task_id, sponsor_user.get('id'), leave_duration_seconds)
+                        logger.info(f"Task {clean_task_id} {leave_duration_seconds} секундийн дараа автоматаар unassign хийгдэх болно")
+                else:
+                    failed_tasks.append(clean_task_id)
+                    logger.error(f"Task {clean_task_id} assign хийхэд алдаа гарлаа")
+            except Exception as e:
+                failed_tasks.append(task_id)
+                logger.error(f"Task {task_id} assign хийхэд алдаа: {str(e)}")
+        
+        result = {
+            "success": success_count > 0,
+            "total_selected": len(selected_task_ids),
+            "success_count": success_count,
+            "failed_count": len(failed_tasks),
+            "failed_tasks": failed_tasks,
+            "assigned_tasks": assigned_tasks,
+            "leave_duration_seconds": leave_duration_seconds,
+            "message": f"{success_count}/{len(selected_task_ids)} таск амжилттай assign хийгдлээ"
+        }
+        
+        if leave_duration_seconds:
+            leave_days = leave_duration_seconds // (24 * 3600)
+            result["message"] += f" (чөлөөний хугацаанд: {leave_days} хоног)"
+        
+        if failed_tasks:
+            result["message"] += f". Алдаа гарсан таскууд: {', '.join(failed_tasks)}"
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Task assign хийхэд алдаа: {str(e)}")
+        return {"success": False, "message": f"Task assign хийхэд алдаа: {str(e)}"}
+
+async def unassign_tasks_on_leave_end(requester_email: str) -> Dict:
+    """Чөлөө дуусахад sponsor дээр assign хийгдсэн таскуудыг unassign хийх"""
+    try:
+        if not PLANNER_AVAILABLE:
+            return {"success": False, "message": "Planner модуль идэвхгүй байна"}
+        
+        # Access token авах
+        token = get_access_token()
+        if not token:
+            return {"success": False, "message": "Access token авч чадсангүй"}
+        
+        # Task assignment manager үүсгэх
+        task_manager = TaskAssignmentManager(token)
+        
+        # Чөлөө авсан хүнийг олох
+        requester_user = task_manager.users_api.search_user_by_email(requester_email)
+        if not requester_user:
+            return {"success": False, "message": f"Чөлөө авсан хүн олдсонгүй: {requester_email}"}
+        
+        # Орлон ажиллах хүмүүсийг авах
+        replacement_workers_result = get_replacement_workers(requester_email)
+        if not replacement_workers_result.get("success"):
+            return {"success": False, "message": "Орлон ажиллах хүмүүсийг авах боломжгүй"}
+        
+        replacement_workers = replacement_workers_result.get("replacement_workers", [])
+        if not replacement_workers:
+            return {"success": True, "message": "Хасах орлон ажиллах хүн байхгүй", "unassigned_count": 0}
+        
+        total_unassigned = 0
+        unassign_results = []
+        
+        # Бүх орлон ажиллах хүмүүсээс таскуудыг unassign хийх
+        for replacement in replacement_workers:
+            try:
+                # Орлон ажиллах хүний таскуудыг авах
+                replacement_tasks = task_manager.get_user_tasks(replacement.get('id'))
+                if not replacement_tasks:
+                    continue
+                
+                # Зөвхөн идэвхтэй таскуудыг unassign хийх
+                active_tasks = [task for task in replacement_tasks if task.get('percentComplete', 0) < 100]
+                
+                unassigned_count = 0
+                for task in active_tasks:
+                    try:
+                        # Таскыг unassign хийх
+                        if task_manager.unassign_task_from_user(task.get('id'), replacement.get('id')):
+                            unassigned_count += 1
+                            logger.info(f"Task {task.get('id')} unassign хийгдлээ: {replacement.get('email')}")
+                        else:
+                            logger.error(f"Task {task.get('id')} unassign хийхэд алдаа гарлаа")
+                    except Exception as e:
+                        logger.error(f"Task {task.get('id')} unassign хийхэд алдаа: {str(e)}")
+                
+                total_unassigned += unassigned_count
+                unassign_results.append({
+                    "replacement_email": replacement.get('email'),
+                    "replacement_name": replacement.get('displayName'),
+                    "unassigned_count": unassigned_count
+                })
+                
+            except Exception as e:
+                logger.error(f"Replacement {replacement.get('email')} дээрх таскууд unassign хийхэд алдаа: {str(e)}")
+        
+        return {
+            "success": True,
+            "total_unassigned": total_unassigned,
+            "replacement_count": len(replacement_workers),
+            "unassign_results": unassign_results,
+            "message": f"{total_unassigned} таск автоматаар unassign хийгдлээ"
+        }
+        
+    except Exception as e:
+        logger.error(f"Task unassign хийхэд алдаа: {str(e)}")
+        return {"success": False, "message": f"Task unassign хийхэд алдаа: {str(e)}"}
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
