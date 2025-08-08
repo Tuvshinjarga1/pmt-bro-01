@@ -1,8 +1,8 @@
 import os
 import logging
 from flask import Flask, request, jsonify
-from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings, TurnContext, MessageFactory, INVOKE_RESPONSE_KEY
-from botbuilder.schema import Activity, Attachment, InvokeResponse
+from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings, TurnContext, MessageFactory
+from botbuilder.schema import Activity, Attachment
 import asyncio
 import json
 from botbuilder.schema import ConversationReference
@@ -2832,22 +2832,15 @@ def process_messages():
                             user_id = activity.from_property.id if activity.from_property else "unknown"
                             user_name = getattr(activity.from_property, 'name', None) if activity.from_property else "Unknown User"
                             card_to_return = await handle_user_adaptive_card_action_invoke(payload, user_id, user_name)
-
-                            # invokeResponse буцаах (Sequential Workflows)
-                            invoke_response = InvokeResponse(
-                                status=200,
-                                body={
-                                    "type": "application/vnd.microsoft.adaptive.card",
-                                    "value": card_to_return or {"type": "AdaptiveCard", "version": "1.5", "body": [{"type": "TextBlock", "text": "✔️ Боловсрууллаа"}]}
-                                }
-                            )
-                            context.turn_state[INVOKE_RESPONSE_KEY] = invoke_response
+                            # Sequential update-ыг дэмжихгүй хувилбаруудад нийцтэй: дараагийн картын мессеж явуулах
+                            if card_to_return:
+                                attachment = Attachment(content_type="application/vnd.microsoft.card.adaptive", content=card_to_return)
+                                await context.send_activity(MessageFactory.attachment(attachment))
                         else:
                             logger.info(f"Unhandled invoke name: {name}")
                     except Exception as e:
                         logger.error(f"Invoke handling error: {str(e)}")
-                        # Алдааны invokeResponse буцаах
-                        context.turn_state[INVOKE_RESPONSE_KEY] = InvokeResponse(status=500, body={"type": "application/vnd.microsoft.adaptive.card", "value": {"type": "AdaptiveCard", "version": "1.5", "body": [{"type": "TextBlock", "text": f"❌ Алдаа: {str(e)}"}]}})
+                        await context.send_activity(f"❌ Картын үйлдлийг боловсруулахад алдаа гарлаа: {str(e)}")
                 else:
                     logger.info(f"Non-message activity type: {activity.type}")
             except Exception as e:
