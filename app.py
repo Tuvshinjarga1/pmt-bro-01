@@ -2903,26 +2903,82 @@ def create_reason_card():
         ]
     }
 
-def create_date_time_card(parsed_data: Dict) -> Dict:
-    """3-р шат: Парслагдсан мэдээллээс шалтгаалж огноо/цаг асуух Adaptive Card"""
-    inactive_hours = parsed_data.get("inactive_hours", parsed_data.get("days", 1) * 8)
-    days = parsed_data.get("days", 1)
+def create_date_time_card(parsed_data: Dict, leave_type: Optional[str] = None, reason_text: Optional[str] = None) -> Dict:
+    """3-р шат: Парслагдсан мэдээллээс шалтгаалж огноо/цаг асуух Adaptive Card
+    - leave_type болон reason-ийг толгой хэсэгт харуулна
+    - Цагаар бол өглөөний цагаас эхлэх байдлаар default утгуудыг (09:00 → 09:00 + inactive_hours) оноож өгнө
+    - Доор нь нийт цагийг текстээр харуулна
+    """
+    inactive_hours = int(parsed_data.get("inactive_hours", parsed_data.get("days", 1) * 8))
+    days = int(parsed_data.get("days", 1))
+    start_date_val = parsed_data.get("start_date")
+    end_date_val = parsed_data.get("end_date") or start_date_val
+
+    header: List[Dict] = []
+    header.append({"type": "TextBlock", "text": "3. Хугацааг шалгах/засварлах", "wrap": True, "weight": "Bolder"})
+    if leave_type:
+        header.append({"type": "TextBlock", "text": f"Чөлөөний төрөл: {leave_type}", "wrap": True})
+    if reason_text:
+        header.append({"type": "TextBlock", "text": f"Шалтгаан: {reason_text}", "wrap": True})
+
+    body: List[Dict] = header
 
     if inactive_hours < 8:
-        # Цагаар - нэг өдөр, эхлэх/дуусах цаг
-        body = [
-            {"type": "TextBlock", "text": "3. Цагаар чөлөө - өдөр, эхлэх/дуусах цагаа оруулна уу", "wrap": True, "weight": "Bolder"},
-            {"type": "Input.Date", "id": "date"},
-            {"type": "Input.Time", "id": "start_time"},
-            {"type": "Input.Time", "id": "end_time"}
-        ]
+        # Цагаар - нэг өдөр, Input.Date + хоёр Input.Time-ийг нэг мөрөнд (ColumnSet) байрлуулна
+        # Өглөөний 09:00-оос эхлэх default
+        start_hhmm = "09:00"
+        try:
+            end_hour = 9 + max(1, inactive_hours)
+            end_hhmm = f"{min(23, end_hour):02d}:00"
+        except Exception:
+            end_hhmm = "13:00"
+
+        if start_date_val:
+            body.append({"type": "Input.Date", "id": "date", "value": start_date_val})
+        else:
+            body.append({"type": "Input.Date", "id": "date"})
+
+        body.append({
+            "type": "ColumnSet",
+            "columns": [
+                {
+                    "type": "Column",
+                    "width": "stretch",
+                    "items": [
+                        {"type": "TextBlock", "text": "Эхлэх цаг", "wrap": True},
+                        {"type": "Input.Time", "id": "start_time", "value": start_hhmm}
+                    ]
+                },
+                {
+                    "type": "Column",
+                    "width": "stretch",
+                    "items": [
+                        {"type": "TextBlock", "text": "Дуусах цаг", "wrap": True},
+                        {"type": "Input.Time", "id": "end_time", "value": end_hhmm}
+                    ]
+                }
+            ]
+        })
+
+        body.append({"type": "TextBlock", "text": f"Нийт: {inactive_hours} цаг", "wrap": True, "spacing": "Medium"})
     else:
-        # Хоногоор - өдрүүдийн тоогоор давталт
-        body = [
-            {"type": "TextBlock", "text": f"3. Хоногоор чөлөө - {days} өдрийн огноонуудыг сонгоно уу", "wrap": True, "weight": "Bolder"}
-        ]
-        for i in range(1, max(1, int(days)) + 1):
-            body.append({"type": "Input.Date", "id": f"day_{i}"})
+        # Хоногоор - өдрүүдийн тоогоор давталт, value-г автоматаар бөглөх
+        body.append({"type": "TextBlock", "text": f"Хоногоор чөлөө - {days} өдрийн огноонуудыг шалгана уу", "wrap": True, "weight": "Bolder"})
+        # Эхний өдрөөс эхлэн дараалсан өдрүүдийг бөглөх оролдлого
+        try:
+            if start_date_val:
+                start_dt = datetime.strptime(start_date_val, "%Y-%m-%d")
+                for i in range(days):
+                    day_dt = start_dt + timedelta(days=i)
+                    body.append({"type": "Input.Date", "id": f"day_{i+1}", "value": day_dt.strftime("%Y-%m-%d")})
+            else:
+                for i in range(1, max(1, days) + 1):
+                    body.append({"type": "Input.Date", "id": f"day_{i}"})
+        except Exception:
+            for i in range(1, max(1, days) + 1):
+                body.append({"type": "Input.Date", "id": f"day_{i}"})
+
+        body.append({"type": "TextBlock", "text": f"Нийт: {days * 8} цаг", "wrap": True, "spacing": "Medium"})
 
     return {
         "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
@@ -2934,15 +2990,44 @@ def create_date_time_card(parsed_data: Dict) -> Dict:
         ]
     }
 
-def create_user_confirmation_card(summary_text: str, request_id: str) -> Dict:
-    """4-р шат: Эцсийн баталгаажуулалт (батлах/засварлах/цуцлах)"""
+def create_user_confirmation_card(summary_text: str, request_id: str, leave_type: str = None, requester_email: str = None) -> Dict:
+    """4-р шат: Эцсийн баталгаажуулалт (батлах/засварлах/цуцлах)
+    - leave_type: Чөлөөний төрөл (string)
+    - requester_email: Planner tasks авахад ашиглана
+    """
+    details_section = []
+    details_section.append({"type": "TextBlock", "text": "Баталгаажуулалт", "weight": "Bolder", "size": "Medium"})
+
+    # Чөлөөний төрөл
+    if leave_type:
+        details_section.append({"type": "TextBlock", "text": f"Чөлөөний төрөл: {leave_type}", "wrap": True})
+
+    # Summary (Хугацаа + Шалтгаан)
+    details_section.append({"type": "TextBlock", "text": summary_text, "wrap": True})
+
+    # Planner таск мэдээлэл
+    if requester_email:
+        try:
+            tasks_info = get_user_planner_tasks(requester_email)
+            if tasks_info:
+                details_section.append({
+                    "type": "TextBlock",
+                    "text": "Таскууд:",
+                    "weight": "Bolder",
+                    "spacing": "Medium"
+                })
+                details_section.append({
+                    "type": "TextBlock",
+                    "text": tasks_info,
+                    "wrap": True
+                })
+        except Exception as e:
+            logger.warning(f"Planner tasks fetch failed in confirmation card: {str(e)}")
+
     return {
         "type": "AdaptiveCard",
         "version": "1.5",
-        "body": [
-            {"type": "TextBlock", "text": "Баталгаажуулалт", "weight": "Bolder", "size": "Medium"},
-            {"type": "TextBlock", "text": summary_text, "wrap": True}
-        ],
+        "body": details_section,
         "actions": [
             {"type": "Action.Execute", "title": "Баталгаажуулах", "verb": "confirmUserRequest", "data": {"request_id": request_id}, "style": "positive"},
             {"type": "Action.Execute", "title": "Засварлах", "verb": "editUserRequest", "data": {"request_id": request_id}},
@@ -3056,8 +3141,13 @@ async def handle_user_adaptive_card_action(context: TurnContext, payload: Dict):
             request_data["wizard"] = {**wizard, **{"step": "confirm"}}
             save_pending_confirmation(user_id, request_data)
 
-            summary = f"📅 {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног / {request_data['inactive_hours']} цаг)\n💭 {request_data['reason']}"
-            card = create_user_confirmation_card(summary, request_id)
+            summary = f"Хугацаа: {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног / {request_data['inactive_hours']} цаг)\nШалтгаан: {request_data['reason']}"
+            card = create_user_confirmation_card(
+                summary,
+                request_id,
+                leave_type=wizard.get("leave_type"),
+                requester_email=(load_user_info(user_id) or {}).get("email")
+            )
             attachment = Attachment(content_type="application/vnd.microsoft.card.adaptive", content=card)
             await context.send_activity(MessageFactory.attachment(attachment))
             return
@@ -3125,7 +3215,7 @@ async def handle_user_adaptive_card_action(context: TurnContext, payload: Dict):
 
             # Pending wizard устгах
             delete_pending_confirmation(user_id)
-            await context.send_activity("✅ Хүсэлтийг илгээж дуусгалаа. Менежерийн зөвшөөрөл хүлээгдэж байна.")
+            await context.send_activity("Менежерийн зөвшөөрөл хүлээгдэж байна.")
             return
 
         if verb in ("edit_user_request",):
@@ -3187,7 +3277,7 @@ async def handle_user_adaptive_card_action_invoke(payload: Dict, user_id: str, u
             wizard["parsed"] = parsed
             request_data.update({"wizard": wizard})
             save_pending_confirmation(user_id, request_data)
-            return create_date_time_card(parsed)
+            return create_date_time_card(parsed, leave_type=wizard.get("leave_type"), reason_text=reason)
 
         # 3. Огноо/цаг → Баталгаажуулах карт буцаах
         if verb in ("submitDatesHours", "submit_dates_hours"):
@@ -3237,8 +3327,14 @@ async def handle_user_adaptive_card_action_invoke(payload: Dict, user_id: str, u
             request_data["wizard"] = {**wizard, **{"step": "confirm"}}
             save_pending_confirmation(user_id, request_data)
 
-            summary = f"📅 {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног / {request_data['inactive_hours']} цаг)\n💭 {request_data['reason']}"
-            return create_user_confirmation_card(summary, request_id)
+            summary = f"Хугацаа: {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног / {request_data['inactive_hours']} цаг)\nШалтгаан: {request_data['reason']}"
+            user_info = load_user_info(user_id) or {}
+            return create_user_confirmation_card(
+                summary,
+                request_id,
+                leave_type=wizard.get("leave_type"),
+                requester_email=user_info.get("email")
+            )
 
         # 4. Баталгаажуулах/засварлах/цуцлах
         if verb in ("confirmUserRequest", "confirm_user_request"):
@@ -3246,7 +3342,7 @@ async def handle_user_adaptive_card_action_invoke(payload: Dict, user_id: str, u
             # Sequential workflow-д шууд дууссаныг илэрхийлэх богино карт буцаана.
             # Харин бодит илгээх ажлыг message урсгалын аналогтой болгохын тулд тусдаа message илгээх шаардлагатай тул
             # invoke-оос зөвхөн карт буцааж, message урсгал руу илгээх нь боломжгүй. Тиймээс message branch-д аль хэдийн дэмжсэн хэвээр байна.
-            return {"type": "AdaptiveCard", "version": "1.5", "body": [{"type": "TextBlock", "text": "Хүсэлтийг илгээж дуусгалаа. Менежерийн зөвшөөрөл хүлээгдэж байна."}]} 
+            return {"type": "AdaptiveCard", "version": "1.5", "body": [{"type": "TextBlock", "text": "Менежерийн зөвшөөрөл хүлээгдэж байна."}]} 
         if verb in ("editUserRequest", "edit_user_request"):
             # Дахин эхний карт буцаах
             new_data = {"request_id": str(uuid.uuid4()), "status": "wizard", "wizard": {"step": "choose_type"}}
