@@ -1115,7 +1115,8 @@ def get_user_planner_tasks(user_email):
 async def call_external_absence_api(request_data):
     """External API руу absence request үүсгэх дуудлага хийх"""
     try:
-        api_url = "https://mcp-server-production-6219.up.railway.app/call-function"
+        # TODO: Config-оос уншдаг болгох
+        api_url = os.getenv("ABSENCE_API_URL", "https://mcp-server-production-c4d1.up.railway.app/call-function")
         
         # API payload бэлтгэх
         # payload = {
@@ -1155,12 +1156,20 @@ async def call_external_absence_api(request_data):
         logger.info(f"Calling external API for absence request: {payload}")
         
         # HTTP POST дуудлага хийх
-        response = requests.post(
-            api_url,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=30
-        )
+        try:
+            response = requests.post(
+                api_url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=30
+            )
+        except requests.exceptions.ConnectionError as ce:
+            logger.error(f"External API connection error: {str(ce)}")
+            return {
+                "success": False,
+                "error": "Connection error",
+                "message": str(ce)
+            }
         
         if response.status_code == 200:
             result = response.json()
@@ -1190,10 +1199,13 @@ async def call_external_absence_api(request_data):
             logger.error(f"API Error Response: {response.text}")
             logger.error(f"API Error Headers: {dict(response.headers)}")
             logger.error(f"Sent Payload: {payload}")
+            # 404 бол fallback function нэр/зам шалгаж энгийн форматтай шинэ endpoint руу оролдох боломжтой
             return {
                 "success": False,
                 "error": f"API returned status {response.status_code}",
-                "message": response.text
+                "message": response.text,
+                "payload": payload,
+                "url": api_url
             }
             
     except requests.exceptions.Timeout:
