@@ -2915,7 +2915,7 @@ def create_date_time_card(parsed_data: Dict, leave_type: Optional[str] = None, r
     end_date_val = parsed_data.get("end_date") or start_date_val
 
     header: List[Dict] = []
-    header.append({"type": "TextBlock", "text": "3. Хугацааг шалгах/засварлах", "wrap": True, "weight": "Bolder"})
+    header.append({"type": "TextBlock", "text": "3. Хугацаа сонгох", "wrap": True, "weight": "Bolder"})
     if leave_type:
         header.append({"type": "TextBlock", "text": f"Чөлөөний төрөл: {leave_type}", "wrap": True})
     if reason_text:
