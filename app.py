@@ -1348,10 +1348,15 @@ async def send_teams_webhook_notification(requester_name, replacement_worker_nam
             days = request_data.get('days', 'N/A')
             reason = request_data.get('reason', 'N/A')
             inactive_hours = request_data.get('inactive_hours', 'N/A')
+            hour_from = request_data.get('hour_from')
+            hour_to = request_data.get('hour_to')
             
             # Teams-д зөв харагдах форматтай мессеж - олон аргаар оролдох
             leave_details = f"📅 Хугацаа: {start_date} - {end_date}"
-            leave_details += f"⏰ Цаг: {inactive_hours} цаг"
+            if hour_from and hour_to and start_date == end_date:
+                leave_details += f"\n⏰ Цаг: {hour_from} - {hour_to} ({inactive_hours} цаг)"
+            else:
+                leave_details += f"\n⏰ Цаг: {inactive_hours} цаг"
             # leave_details += f"\\n💭 Шалтгаан: {reason}"
         
         # Таск шилжүүлэх мэдээлэл нэмэх
@@ -2500,9 +2505,18 @@ def process_messages():
                 if activity.type == "message":
                     # Adaptive card action шалгах
                     if activity.value:
-                        # Adaptive card submit action
+                        # Adaptive card submit/execute action ялгах
                         action_data = activity.value
-                        await handle_adaptive_card_action(context, action_data)
+                        try:
+                            # Менежерийн approval картууд нь data-д action + request_id дамжуулдаг
+                            if isinstance(action_data, dict) and action_data.get("action") in {"approve", "reject"} and action_data.get("request_id"):
+                                await handle_adaptive_card_action(context, action_data)
+                            else:
+                                # Хэрэглэгчийн wizard урсгалын картын үйлдлүүд
+                                await handle_user_adaptive_card_action(context, action_data)
+                        except Exception as e:
+                            logger.error(f"Error dispatching adaptive card action: {str(e)}")
+                            await context.send_activity("❌ Картын үйлдлийг боловсруулахад алдаа гарлаа.")
                     else:
                         # Ердийн мессеж
                         user_text = activity.text or "No text provided"
@@ -2535,10 +2549,44 @@ def process_messages():
                             is_manager = False
                         
                         if not is_manager:
+                            # Чөлөөний түлхүүр үг илэрвэл wizard-ийг эхлүүлэх
+                            try:
+                                if is_leave_request(user_text):
+                                    # Wizard эхлүүлэх - төрөл сонгох карт илгээх
+                                    leave_type_card = create_leave_type_card()
+                                    adaptive_card_attachment = Attachment(
+                                        content_type="application/vnd.microsoft.card.adaptive",
+                                        content=leave_type_card
+                                    )
+                                    await context.send_activity(MessageFactory.attachment(adaptive_card_attachment))
+                                    # Wizard-ийн түр өгөгдөл хадгалах
+                                    wizard_request_id = str(uuid.uuid4())
+                                    wizard_data = {
+                                        "request_id": wizard_request_id,
+                                        "status": "wizard",
+                                        "wizard": {
+                                            "step": "choose_type"
+                                        },
+                                        "requester_user_id": user_id,
+                                        "requester_name": user_name,
+                                    }
+                                    save_pending_confirmation(user_id, wizard_data)
+                                    return
+                            except Exception as e:
+                                logger.warning(f"Failed to start wizard: {str(e)}")
+                                # Алдаа гарвал хуучин урсгалаар үргэлжлүүлнэ
                             # Хэрэв хэрэглэгчтэй pending confirmation байвал
                             pending_confirmation = load_pending_confirmation(user_id)
                             
                             if pending_confirmation:
+                                # Хэрэв wizard урсгал идэвхтэй байвал, товч дарж үргэлжлүүлэхийг сануулах
+                                try:
+                                    pd = pending_confirmation.get("request_data", {}) if isinstance(pending_confirmation, dict) else {}
+                                    if (pd.get("status") == "wizard") or (pending_confirmation.get("status") == "wizard"):
+                                        await context.send_activity("🧭 Чөлөөний хүсэлтийн алхамт урсгал идэвхтэй байна. Картан дээрх товчийг ашиглан үргэлжлүүлнэ үү.")
+                                        return
+                                except Exception:
+                                    pass
                                 # Баталгаажуулалтын хариу шалгах
                                 confirmation_response = is_confirmation_response(user_text)
                                 
@@ -2764,6 +2812,30 @@ def process_messages():
                                 # Ердийн мессеж - зөвхөн echo хариу
                                 await context.send_activity(f"Таны мессежийг хүлээн авлаа: {user_text}")
                                 logger.info(f"Skipping forwarding message to admin from approver himself: {user_id}")
+                elif activity.type == "invoke":
+                    # Action.Execute дэмжлэг (Teams Adaptive Card)
+                    try:
+                        name = getattr(activity, 'name', None)
+                        if name == "adaptiveCard/action":
+                            raw = activity.value or {}
+                            action = raw.get("action", {}) if isinstance(raw, dict) else {}
+                            inputs = raw.get("data", {}) if isinstance(raw, dict) else {}
+                            # Нэгтгэж payload үүсгэх (verb + data + inputs)
+                            payload = {**inputs}
+                            if isinstance(action, dict):
+                                if action.get("verb"):
+                                    payload["verb"] = action.get("verb")
+                                # Action.Submit-тэй нийцүүлэхийн тулд data-г нийлүүлэх
+                                if isinstance(action.get("data"), dict):
+                                    payload.update(action.get("data"))
+                            # Менежер эсэхээс үл хамааран хэрэглэгчийн handler-рүү өгөх
+                            await handle_user_adaptive_card_action(context, payload)
+                            await context.send_activity("✔️")
+                        else:
+                            logger.info(f"Unhandled invoke name: {name}")
+                    except Exception as e:
+                        logger.error(f"Invoke handling error: {str(e)}")
+                        await context.send_activity("❌ Картын үйлдлийг боловсруулахад алдаа гарлаа.")
                 else:
                     logger.info(f"Non-message activity type: {activity.type}")
             except Exception as e:
@@ -2783,6 +2855,316 @@ def process_messages():
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+def create_leave_type_card():
+    """1-р шат: Чөлөөний төрөл сонгох Adaptive Card"""
+    return {
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "type": "AdaptiveCard",
+        "version": "1.5",
+        "body": [
+            {"type": "TextBlock", "text": "1. Чөлөөний төрөл сонгоно уу", "wrap": True, "weight": "Bolder", "size": "Medium"},
+            {
+                "type": "Input.ChoiceSet",
+                "id": "leave_type",
+                "style": "compact",
+                "choices": [
+                    {"title": "Цалинтай богино чөлөө", "value": "paid_short"},
+                    {"title": "Өвчтэй", "value": "sick"},
+                    {"title": "Remote ажиллах", "value": "remote"},
+                    {"title": "Ээлжийн амралт", "value": "vacation"},
+                    {"title": "Эрүүл мэндийн өдөр", "value": "wellness"},
+                    {"title": "Бусад", "value": "other"}
+                ]
+            }
+        ],
+        "actions": [
+            {"type": "Action.Execute", "title": "Дараах", "verb": "chooseLeaveType", "style": "positive"}
+        ]
+    }
+
+def create_reason_card():
+    """2-р шат: Шалтгаан оруулах Adaptive Card"""
+    return {
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "type": "AdaptiveCard",
+        "version": "1.5",
+        "body": [
+            {"type": "TextBlock", "text": "Чөлөөний шалтгаан", "wrap": True},
+            {"type": "Input.Text", "id": "reason", "placeholder": "Шалтгаан бичнэ үү", "isMultiline": True}
+        ],
+        "actions": [
+            {"type": "Action.Execute", "title": "Дараах", "verb": "submitLeaveRequest", "style": "positive"}
+        ]
+    }
+
+def create_date_time_card(parsed_data: Dict) -> Dict:
+    """3-р шат: Парслагдсан мэдээллээс шалтгаалж огноо/цаг асуух Adaptive Card"""
+    inactive_hours = parsed_data.get("inactive_hours", parsed_data.get("days", 1) * 8)
+    days = parsed_data.get("days", 1)
+
+    if inactive_hours < 8:
+        # Цагаар - нэг өдөр, эхлэх/дуусах цаг
+        body = [
+            {"type": "TextBlock", "text": "3. Цагаар чөлөө - өдөр, эхлэх/дуусах цагаа оруулна уу", "wrap": True, "weight": "Bolder"},
+            {"type": "Input.Date", "id": "date"},
+            {"type": "Input.Time", "id": "start_time"},
+            {"type": "Input.Time", "id": "end_time"}
+        ]
+    else:
+        # Хоногоор - өдрүүдийн тоогоор давталт
+        body = [
+            {"type": "TextBlock", "text": f"3. Хоногоор чөлөө - {days} өдрийн огноонуудыг сонгоно уу", "wrap": True, "weight": "Bolder"}
+        ]
+        for i in range(1, max(1, int(days)) + 1):
+            body.append({"type": "Input.Date", "id": f"day_{i}"})
+
+    return {
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "type": "AdaptiveCard",
+        "version": "1.5",
+        "body": body,
+        "actions": [
+            {"type": "Action.Execute", "title": "Дараах", "verb": "submitDatesHours", "style": "positive"}
+        ]
+    }
+
+def create_user_confirmation_card(summary_text: str, request_id: str) -> Dict:
+    """4-р шат: Эцсийн баталгаажуулалт (батлах/засварлах/цуцлах)"""
+    return {
+        "type": "AdaptiveCard",
+        "version": "1.5",
+        "body": [
+            {"type": "TextBlock", "text": "Баталгаажуулалт", "weight": "Bolder", "size": "Medium"},
+            {"type": "TextBlock", "text": summary_text, "wrap": True}
+        ],
+        "actions": [
+            {"type": "Action.Execute", "title": "Баталгаажуулах", "verb": "confirmUserRequest", "data": {"request_id": request_id}, "style": "positive"},
+            {"type": "Action.Execute", "title": "Засварлах", "verb": "editUserRequest", "data": {"request_id": request_id}},
+            {"type": "Action.Execute", "title": "Цуцлах", "verb": "cancelUserRequest", "data": {"request_id": request_id}, "style": "destructive"}
+        ]
+    }
+
+async def handle_user_adaptive_card_action(context: TurnContext, payload: Dict):
+    """Хэрэглэгчийн wizard урсгалын Adaptive Card action-уудыг боловсруулах"""
+    try:
+        verb = payload.get("verb") or payload.get("user_action")
+        values = payload
+
+        user_id = context.activity.from_property.id
+        user_name = getattr(context.activity.from_property, 'name', None)
+
+        pending = load_pending_confirmation(user_id) or {}
+        request_data = pending.get("request_data", pending) or {}
+        wizard = request_data.get("wizard", {})
+        request_id = request_data.get("request_id") or str(uuid.uuid4())
+
+        # 1. Төрөл сонгох
+        if verb in ("chooseLeaveType", "choose_leave_type"):
+            leave_type = values.get("leave_type")
+            if not leave_type:
+                await context.send_activity("❌ Төрөл сонгогдоогүй байна.")
+                return
+            wizard.update({"step": "reason", "leave_type": leave_type})
+            request_data.update({
+                "request_id": request_id,
+                "status": "wizard",
+                "wizard": wizard,
+                "requester_user_id": user_id,
+                "requester_name": user_name
+            })
+            save_pending_confirmation(user_id, request_data)
+
+            # Дараах карт: шалтгаан
+            card = create_reason_card()
+            attachment = Attachment(content_type="application/vnd.microsoft.card.adaptive", content=card)
+            await context.send_activity(MessageFactory.attachment(attachment))
+            return
+
+        # 2. Шалтгаан илгээх
+        if verb in ("submitLeaveRequest", "submit_reason"):
+            reason = values.get("reason", "")
+            if not reason.strip():
+                await context.send_activity("❌ Шалтгаан хоосон байна.")
+                return
+            wizard.update({"step": "date_time", "reason": reason})
+            # GPT-ээр парслах
+            parsed = parse_leave_request(reason, user_name or "User")
+            wizard["parsed"] = parsed
+            request_data.update({"wizard": wizard})
+            save_pending_confirmation(user_id, request_data)
+
+            # Дараах карт: огноо/цаг асуух
+            card = create_date_time_card(parsed)
+            attachment = Attachment(content_type="application/vnd.microsoft.card.adaptive", content=card)
+            await context.send_activity(MessageFactory.attachment(attachment))
+            return
+
+        # 3. Огноо/цаг баталгаажуулах
+        if verb in ("submit_dates_hours", "submitDatesHours"):
+            parsed = wizard.get("parsed", {})
+            inactive_hours = parsed.get("inactive_hours", parsed.get("days", 1) * 8)
+            days = parsed.get("days", 1)
+
+            final = {}
+            if inactive_hours < 8:
+                date = values.get("date")
+                start_time = values.get("start_time")
+                end_time = values.get("end_time")
+                if not all([date, start_time, end_time]):
+                    await context.send_activity("❌ Огноо болон цагийн мэдээллийг бүрэн оруулна уу.")
+                    return
+                final.update({
+                    "start_date": date,
+                    "end_date": date,
+                    "inactive_hours": max(1, _safe_diff_hours(start_time, end_time)),
+                    "days": 1,
+                    "hour_from": start_time,
+                    "hour_to": end_time
+                })
+            else:
+                selected_days = []
+                for i in range(1, max(1, int(days)) + 1):
+                    d = values.get(f"day_{i}")
+                    if d:
+                        selected_days.append(d)
+                if not selected_days:
+                    await context.send_activity("❌ Наад зах нь нэг огноо сонгоно уу.")
+                    return
+                selected_days_sorted = sorted(selected_days)
+                final.update({
+                    "start_date": selected_days_sorted[0],
+                    "end_date": selected_days_sorted[-1],
+                    "inactive_hours": len(selected_days_sorted) * 8,
+                    "days": len(selected_days_sorted)
+                })
+
+            # Эцсийн нэгтгэл
+            request_data.update({
+                "request_id": request_id,
+                "requester_user_id": user_id,
+                "requester_name": user_name,
+                "reason": wizard.get("reason", parsed.get("reason", "day_off")),
+                "status": "pending",
+                **final
+            })
+            request_data["wizard"] = {**wizard, **{"step": "confirm"}}
+            save_pending_confirmation(user_id, request_data)
+
+            summary = f"📅 {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног / {request_data['inactive_hours']} цаг)\n💭 {request_data['reason']}"
+            card = create_user_confirmation_card(summary, request_id)
+            attachment = Attachment(content_type="application/vnd.microsoft.card.adaptive", content=card)
+            await context.send_activity(MessageFactory.attachment(attachment))
+            return
+
+        # 4. Баталгаажуулах/засварлах/цуцлах
+        if verb in ("confirm_user_request",):
+            # pending-г унших
+            if not request_data.get("start_date"):
+                await context.send_activity("❌ Хүсэлтийн мэдээлэл дутуу байна.")
+                return
+
+            # Хүсэлт гаргагчийн мэдээлэл
+            requester_info = None
+            for user in list_all_users():
+                if user["user_id"] == user_id:
+                    requester_info = user
+                    break
+            requester_email = requester_info.get("email") if requester_info else None
+            if not requester_email:
+                await context.send_activity("❌ Таны имэйл тодорхойгүй байна. Эхлээд bot-той чатлана уу.")
+                return
+
+            leave_days = request_data.get("days", 1)
+            manager_id = get_available_manager_id(requester_email, leave_days)
+            # Manager info
+            manager_info = None
+            if manager_id:
+                try:
+                    token = get_graph_access_token()
+                    if token:
+                        users_api = MicrosoftUsersAPI(token)
+                        manager_info = users_api.get_user_by_id(manager_id)
+                except Exception as e:
+                    logger.warning(f"Manager info get failed: {str(e)}")
+
+            finalized_request = {
+                "request_id": request_id,
+                "requester_email": requester_email,
+                "requester_name": requester_info.get("user_name", requester_email) if requester_info else user_name,
+                "requester_user_id": user_id,
+                "start_date": request_data["start_date"],
+                "end_date": request_data["end_date"],
+                "days": request_data["days"],
+                "reason": request_data.get("reason", "day_off"),
+                "inactive_hours": request_data.get("inactive_hours", request_data.get("days", 1) * 8),
+                "status": "pending",
+                "original_message": request_data.get("original_message", "wizard"),
+                "created_at": datetime.now().isoformat(),
+                "approver_email": manager_info.get("mail") if manager_info else None,
+                "approver_user_id": manager_id
+            }
+
+            # Хадгалах
+            save_leave_request(finalized_request)
+
+            # External API руу дуудлага
+            api_result = await call_external_absence_api(finalized_request)
+            if api_result.get("success") and api_result.get("absence_id"):
+                finalized_request["absence_id"] = api_result["absence_id"]
+                save_leave_request(finalized_request)
+                save_user_absence_id(user_id, api_result["absence_id"])
+
+            # Менежер рүү илгээх
+            await send_approved_request_to_manager(finalized_request, request_data.get("original_message", "wizard"))
+
+            # Олон нийтэд webhook-ээр мэдэгдэх
+            try:
+                requester_display_name = finalized_request.get("requester_name", "Ажилтан")
+                awaitable = send_teams_webhook_notification(requester_display_name, None, finalized_request, None)
+                # send_teams_webhook_notification нь async функц тул await хийх
+                if asyncio.iscoroutinefunction(send_teams_webhook_notification):
+                    await awaitable
+            except Exception as e:
+                logger.warning(f"Webhook notify failed: {str(e)}")
+
+            # Pending wizard устгах
+            delete_pending_confirmation(user_id)
+            await context.send_activity("✅ Хүсэлтийг илгээж дуусгалаа. Менежерийн зөвшөөрөл хүлээгдэж байна.")
+            return
+
+        if verb in ("edit_user_request",):
+            # Дахин төрөл сонгохоос эхлүүлнэ
+            card = create_leave_type_card()
+            attachment = Attachment(content_type="application/vnd.microsoft.card.adaptive", content=card)
+            await context.send_activity(MessageFactory.attachment(attachment))
+            # Wizard дахин эхлүүлэх
+            new_data = {"request_id": str(uuid.uuid4()), "status": "wizard", "wizard": {"step": "choose_type"}}
+            save_pending_confirmation(user_id, new_data)
+            return
+
+        if verb in ("cancel_user_request",):
+            delete_pending_confirmation(user_id)
+            await context.send_activity("🚫 Хүсэлт цуцлагдлаа.")
+            return
+
+        # Аль ч биш бол үл тоомсорлох
+        logger.info(f"Unhandled user adaptive card verb: {verb}")
+    except Exception as e:
+        logger.error(f"Error in handle_user_adaptive_card_action: {str(e)}")
+        await context.send_activity(f"❌ Алдаа: {str(e)}")
+
+def _safe_diff_hours(start_time_str: str, end_time_str: str) -> int:
+    """HH:MM -> HH:MM цагийн зөрүүг цаг болгож буцаана (доод тал нь 1)."""
+    try:
+        start_h, start_m = [int(x) for x in start_time_str.split(":", 1)]
+        end_h, end_m = [int(x) for x in end_time_str.split(":", 1)]
+        start_total = start_h * 60 + start_m
+        end_total = end_h * 60 + end_m
+        diff_min = max(0, end_total - start_total)
+        return max(1, diff_min // 60)  # Дор хаяж 1 цаг
+    except Exception:
+        return 1
 
 async def handle_adaptive_card_action(context: TurnContext, action_data):
     """Adaptive card action-уудыг handle хийх"""
