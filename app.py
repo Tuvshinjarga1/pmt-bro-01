@@ -1129,19 +1129,26 @@ async def call_external_absence_api(request_data):
         #     }
         # }
         
-        # Хэрэглэгчийн анхны мессежийг description болгон ашиглах
+        # Хэрэглэгчийн анхны мессеж + товч мэдээллийг description болгон ашиглах
         original_message = request_data.get("original_message", "")
-        description = original_message
-        
+        reason = request_data.get("reason", "day_off")
+        inactive_hours = request_data.get("inactive_hours", 8)
+        desc_parts = []
+        if original_message:
+            desc_parts.append(original_message)
+        desc_parts.append(f"reason={reason}")
+        desc_parts.append(f"hours={inactive_hours}")
+        description = " | ".join(desc_parts)
+
         payload = {
             "function": "create_absence_request",
             "args": {
                 "user_email": "test_user10@fibo.cloud",
                 "start_date": request_data.get("start_date"),
                 "end_date": request_data.get("end_date"),
-                "reason": request_data.get("reason", "day_off"),
-                "in_active_hours": request_data.get("inactive_hours", 8),
-                "Description": description
+                "reason": reason,
+                "in_active_hours": inactive_hours,
+                "description": description
             }
         }
         
@@ -2579,6 +2586,29 @@ def process_messages():
                             pending_confirmation = load_pending_confirmation(user_id)
                             
                             if pending_confirmation:
+                                # Wizard: шалтгаан мессежээр хүлээж авах үе
+                                try:
+                                    pd = pending_confirmation.get("request_data", {}) if isinstance(pending_confirmation, dict) else {}
+                                    wizard_state = pd.get("wizard", {})
+                                    if pd.get("status") == "wizard" and wizard_state.get("step") == "await_reason":
+                                        reason_text = user_text.strip()
+                                        # Reason хадгалах
+                                        wizard_state["reason"] = reason_text
+                                        wizard_state["step"] = "date_time"
+                                        pd["wizard"] = wizard_state
+                                        save_pending_confirmation(user_id, pd)
+                                        # GPT-ээр парслах
+                                        parsed = parse_leave_request(reason_text, user_name)
+                                        wizard_state["parsed"] = parsed
+                                        pd["wizard"] = wizard_state
+                                        save_pending_confirmation(user_id, pd)
+                                        # Дараагийн карт: хугацаа/цаг
+                                        date_time_card = create_date_time_card(parsed, leave_type=wizard_state.get("leave_type"), reason_text=reason_text)
+                                        attachment = Attachment(content_type="application/vnd.microsoft.card.adaptive", content=date_time_card)
+                                        await context.send_activity(MessageFactory.attachment(attachment))
+                                        return
+                                except Exception as e:
+                                    logger.warning(f"Failed to process await_reason message: {str(e)}")
                                 # Хэрэв wizard урсгал идэвхтэй байвал, товч дарж үргэлжлүүлэхийг сануулах
                                 try:
                                     pd = pending_confirmation.get("request_data", {}) if isinstance(pending_confirmation, dict) else {}
@@ -2831,7 +2861,7 @@ def process_messages():
                             # Менежер эсэхээс үл хамааран хэрэглэгчийн invoke handler-рүү өгөх
                             user_id = activity.from_property.id if activity.from_property else "unknown"
                             user_name = getattr(activity.from_property, 'name', None) if activity.from_property else "Unknown User"
-                            card_to_return = await handle_user_adaptive_card_action_invoke(payload, user_id, user_name)
+                            card_to_return = await handle_user_adaptive_card_action_invoke(context, payload, user_id, user_name)
                             # Sequential update-ыг дэмжихгүй хувилбаруудад нийцтэй: дараагийн картын мессеж явуулах
                             if card_to_return:
                                 attachment = Attachment(content_type="application/vnd.microsoft.card.adaptive", content=card_to_return)
@@ -3055,7 +3085,7 @@ async def handle_user_adaptive_card_action(context: TurnContext, payload: Dict):
             if not leave_type:
                 await context.send_activity("❌ Төрөл сонгогдоогүй байна.")
                 return
-            wizard.update({"step": "reason", "leave_type": leave_type})
+            wizard.update({"step": "await_reason", "leave_type": leave_type})
             request_data.update({
                 "request_id": request_id,
                 "status": "wizard",
@@ -3065,10 +3095,8 @@ async def handle_user_adaptive_card_action(context: TurnContext, payload: Dict):
             })
             save_pending_confirmation(user_id, request_data)
 
-            # Дараах карт: шалтгаан
-            card = create_reason_card()
-            attachment = Attachment(content_type="application/vnd.microsoft.card.adaptive", content=card)
-            await context.send_activity(MessageFactory.attachment(attachment))
+            # Карт биш, жирийн мессежээр шалтгаан асуух
+            await context.send_activity("Шалтгаанаа бичнэ үү.")
             return
 
         # 2. Шалтгаан илгээх
@@ -3239,7 +3267,7 @@ async def handle_user_adaptive_card_action(context: TurnContext, payload: Dict):
         logger.error(f"Error in handle_user_adaptive_card_action: {str(e)}")
         await context.send_activity(f"❌ Алдаа: {str(e)}")
 
-async def handle_user_adaptive_card_action_invoke(payload: Dict, user_id: str, user_name: Optional[str]) -> Optional[Dict]:
+async def handle_user_adaptive_card_action_invoke(context: TurnContext, payload: Dict, user_id: str, user_name: Optional[str]) -> Optional[Dict]:
     """Sequential Workflow (Action.Execute) - invokeResponse-д буцаах Adaptive Card-ыг үүсгэнэ.
     Буцах утга: дараагийн шатны Adaptive Card (эсвэл None бол богино текст карт)."""
     try:
@@ -3338,11 +3366,73 @@ async def handle_user_adaptive_card_action_invoke(payload: Dict, user_id: str, u
 
         # 4. Баталгаажуулах/засварлах/цуцлах
         if verb in ("confirmUserRequest", "confirm_user_request"):
-            # Энд зөвхөн карт буцаахгүй; бодит илгээх ажлыг message урсгал талаас гүйцэтгэнэ гэж байсан.
-            # Sequential workflow-д шууд дууссаныг илэрхийлэх богино карт буцаана.
-            # Харин бодит илгээх ажлыг message урсгалын аналогтой болгохын тулд тусдаа message илгээх шаардлагатай тул
-            # invoke-оос зөвхөн карт буцааж, message урсгал руу илгээх нь боломжгүй. Тиймээс message branch-д аль хэдийн дэмжсэн хэвээр байна.
-            return {"type": "AdaptiveCard", "version": "1.5", "body": [{"type": "TextBlock", "text": "Менежерийн зөвшөөрөл хүлээгдэж байна."}]} 
+            # Pending-ээс авах
+            pending2 = load_pending_confirmation(user_id) or {}
+            rd = pending2.get("request_data", pending2) or {}
+            if not rd.get("start_date"):
+                return {"type": "AdaptiveCard", "version": "1.5", "body": [{"type": "TextBlock", "text": "❌ Хүсэлтийн мэдээлэл дутуу байна."}]}
+
+            # Хүсэлт гаргагчийн мэдээлэл
+            requester_info = None
+            for user in list_all_users():
+                if user["user_id"] == user_id:
+                    requester_info = user
+                    break
+            requester_email = requester_info.get("email") if requester_info else None
+            if not requester_email:
+                return {"type": "AdaptiveCard", "version": "1.5", "body": [{"type": "TextBlock", "text": "❌ Таны имэйл тодорхойгүй байна."}]}
+
+            # Менежер тодорхойлох
+            leave_days = rd.get("days", 1)
+            manager_id = get_available_manager_id(requester_email, leave_days)
+            manager_info = None
+            if manager_id:
+                try:
+                    token = get_graph_access_token()
+                    if token:
+                        users_api = MicrosoftUsersAPI(token)
+                        manager_info = users_api.get_user_by_id(manager_id)
+                except Exception as e:
+                    logger.warning(f"Manager info get failed: {str(e)}")
+
+            finalized_request = {
+                "request_id": rd.get("request_id") or str(uuid.uuid4()),
+                "requester_email": requester_email,
+                "requester_name": requester_info.get("user_name", requester_email) if requester_info else user_name,
+                "requester_user_id": user_id,
+                "start_date": rd["start_date"],
+                "end_date": rd["end_date"],
+                "days": rd["days"],
+                "reason": rd.get("reason", "day_off"),
+                "inactive_hours": rd.get("inactive_hours", rd.get("days", 1) * 8),
+                "status": "pending",
+                "original_message": rd.get("original_message", "wizard"),
+                "created_at": datetime.now().isoformat(),
+                "approver_email": manager_info.get("mail") if manager_info else None,
+                "approver_user_id": manager_id
+            }
+
+            # Хадгалах
+            save_leave_request(finalized_request)
+
+            # External систем рүү илгээх
+            api_result = await call_external_absence_api(finalized_request)
+            if api_result.get("success") and api_result.get("absence_id"):
+                finalized_request["absence_id"] = api_result["absence_id"]
+                save_leave_request(finalized_request)
+                save_user_absence_id(user_id, api_result["absence_id"])
+
+            # Менежер рүү илгээх
+            await send_approved_request_to_manager(finalized_request, rd.get("reason", "wizard"))
+
+            # Pending wizard устгах, хэрэглэгчид мэдэгдэх
+            delete_pending_confirmation(user_id)
+            try:
+                await context.send_activity("Менежерийн зөвшөөрөл хүлээгдэж байна.")
+            except Exception:
+                pass
+
+            return {"type": "AdaptiveCard", "version": "1.5", "body": [{"type": "TextBlock", "text": "Менежерийн зөвшөөрөл хүлээгдэж байна."}]}
         if verb in ("editUserRequest", "edit_user_request"):
             # Дахин эхний карт буцаах
             new_data = {"request_id": str(uuid.uuid4()), "status": "wizard", "wizard": {"step": "choose_type"}}
