@@ -1129,56 +1129,9 @@ async def call_external_absence_api(request_data):
         #     }
         # }
         
-        # Хэрэглэгчийн анхны мессежээс шалтгааныг олж авах
+        # Хэрэглэгчийн анхны мессежийг description болгон ашиглах
         original_message = request_data.get("original_message", "")
-        
-        # GPT model ашиглаж natural language ойлгох оролдлого
-        description = ""
-        if original_message and openai_client.api_key:
-            try:
-                # GPT-тэй шалтгааныг олж авах
-                prompt = f"""
-Доорх мессежээс чөлөөний шалтгааныг монгол хэлээр товч тайлбарлана уу:
-
-Мессеж: "{original_message}"
-
-Зөвхөн шалтгааныг монгол хэлээр бичээд буцаана уу (жишээ: "Өвчний чөлөө", "Хувийн шалтгаан", "Амралтын чөлөө" гэх мэт).
-"""
-
-                response = openai_client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=[
-                        {"role": "system", "content": "Та чөлөөний шалтгааныг ойлгож, монгол хэлээр товч тайлбарладаг туслах."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.1,
-                    max_tokens=50
-                )
-                
-                description = response.choices[0].message.content.strip()
-                logger.info(f"GPT-ээс олж авсан шалтгаан: {description}")
-                
-            except Exception as e:
-                logger.warning(f"GPT-ээс шалтгаан олж авах боломжгүй: {str(e)}")
-                # Fallback - энгийн keyword check
-                text_lower = original_message.lower()
-                sick_keywords = ['өвчтэй', 'өвчин', 'эмнэлэг', 'эмнэлгийн', 'sick', 'illness', 'hospital', 'medical', 'эрүүл мэнд', 'эрүүлмэнд']
-                is_sick_leave = any(keyword in text_lower for keyword in sick_keywords)
-                
-                if is_sick_leave:
-                    description = "Өвчний чөлөө"
-                else:
-                    description = "Хувийн шалтгаан"
-        elif original_message:
-            # GPT ашиглах боломжгүй бол энгийн keyword check
-            text_lower = original_message.lower()
-            sick_keywords = ['өвчтэй', 'өвчин', 'эмнэлэг', 'эмнэлгийн', 'sick', 'illness', 'hospital', 'medical', 'эрүүл мэнд', 'эрүүлмэнд']
-            is_sick_leave = any(keyword in text_lower for keyword in sick_keywords)
-            
-            if is_sick_leave:
-                description = "Өвчний чөлөө"
-            else:
-                description = "Хувийн шалтгаан"
+        description = original_message
         
         payload = {
             "function": "create_absence_request",
@@ -1188,7 +1141,7 @@ async def call_external_absence_api(request_data):
                 "end_date": request_data.get("end_date"),
                 "reason": request_data.get("reason", "day_off"),
                 "in_active_hours": request_data.get("inactive_hours", 8),
-                "description": description
+                "Description": description
             }
         }
         
