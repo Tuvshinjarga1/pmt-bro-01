@@ -3020,20 +3020,40 @@ def create_date_time_card(parsed_data: Dict, leave_type: Optional[str] = None, r
         ]
     }
 
-def create_user_confirmation_card(summary_text: str, request_id: str, leave_type: str = None, requester_email: str = None) -> Dict:
+def create_user_confirmation_card(
+    request_id: str,
+    leave_type: Optional[str] = None,
+    requester_email: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    days: Optional[int] = None,
+    inactive_hours: Optional[int] = None,
+    reason: Optional[str] = None,
+) -> Dict:
     """4-р шат: Эцсийн баталгаажуулалт (батлах/засварлах/цуцлах)
-    - leave_type: Чөлөөний төрөл (string)
-    - requester_email: Planner tasks авахад ашиглана
+    Хугацаа ба Шалтгааныг тусдаа блокуудаар харуулна.
     """
-    details_section = []
+    details_section: List[Dict] = []
     details_section.append({"type": "TextBlock", "text": "Баталгаажуулалт", "weight": "Bolder", "size": "Medium"})
 
     # Чөлөөний төрөл
     if leave_type:
         details_section.append({"type": "TextBlock", "text": f"Чөлөөний төрөл: {leave_type}", "wrap": True})
 
-    # Summary (Хугацаа + Шалтгаан)
-    details_section.append({"type": "TextBlock", "text": summary_text, "wrap": True})
+    # Хугацаа (тусад нь)
+    if start_date and end_date:
+        dur_text = f"{start_date} - {end_date}"
+        if days is not None and inactive_hours is not None:
+            dur_text += f" ({days} хоног / {inactive_hours} цаг)"
+        elif days is not None:
+            dur_text += f" ({days} хоног)"
+        elif inactive_hours is not None:
+            dur_text += f" ({inactive_hours} цаг)"
+        details_section.append({"type": "TextBlock", "text": f"Хугацаа: {dur_text}", "wrap": True})
+
+    # Шалтгаан (тусад нь)
+    if reason is not None:
+        details_section.append({"type": "TextBlock", "text": f"Шалтгаан: {reason}", "wrap": True})
 
     # Planner таск мэдээлэл
     if requester_email:
@@ -3169,12 +3189,15 @@ async def handle_user_adaptive_card_action(context: TurnContext, payload: Dict):
             request_data["wizard"] = {**wizard, **{"step": "confirm"}}
             save_pending_confirmation(user_id, request_data)
 
-            summary = f"Хугацаа: {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног / {request_data['inactive_hours']} цаг)\nШалтгаан: {request_data['reason']}"
             card = create_user_confirmation_card(
-                summary,
-                request_id,
+                request_id=request_id,
                 leave_type=wizard.get("leave_type"),
-                requester_email=(load_user_info(user_id) or {}).get("email")
+                requester_email=(load_user_info(user_id) or {}).get("email"),
+                start_date=request_data['start_date'],
+                end_date=request_data['end_date'],
+                days=request_data['days'],
+                inactive_hours=request_data['inactive_hours'],
+                reason=request_data['reason']
             )
             attachment = Attachment(content_type="application/vnd.microsoft.card.adaptive", content=card)
             await context.send_activity(MessageFactory.attachment(attachment))
@@ -3241,9 +3264,8 @@ async def handle_user_adaptive_card_action(context: TurnContext, payload: Dict):
             # Менежер рүү илгээх
             await send_approved_request_to_manager(finalized_request, request_data.get("original_message", "wizard"))
 
-            # Pending wizard устгах
+            # Pending wizard устгах ба дараагийн карт (invokeResponse/message) аль хэдийн хэрэглэгчид мэдээлэл өгч байгаа тул
             delete_pending_confirmation(user_id)
-            await context.send_activity("Менежерийн зөвшөөрөл хүлээгдэж байна.")
             return
 
         if verb in ("edit_user_request",):
@@ -3355,13 +3377,16 @@ async def handle_user_adaptive_card_action_invoke(context: TurnContext, payload:
             request_data["wizard"] = {**wizard, **{"step": "confirm"}}
             save_pending_confirmation(user_id, request_data)
 
-            summary = f"Хугацаа: {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног / {request_data['inactive_hours']} цаг)\nШалтгаан: {request_data['reason']}"
             user_info = load_user_info(user_id) or {}
             return create_user_confirmation_card(
-                summary,
-                request_id,
+                request_id=request_id,
                 leave_type=wizard.get("leave_type"),
-                requester_email=user_info.get("email")
+                requester_email=user_info.get("email"),
+                start_date=request_data['start_date'],
+                end_date=request_data['end_date'],
+                days=request_data['days'],
+                inactive_hours=request_data['inactive_hours'],
+                reason=request_data['reason']
             )
 
         # 4. Баталгаажуулах/засварлах/цуцлах
@@ -3425,13 +3450,9 @@ async def handle_user_adaptive_card_action_invoke(context: TurnContext, payload:
             # Менежер рүү илгээх
             await send_approved_request_to_manager(finalized_request, rd.get("reason", "wizard"))
 
-            # Pending wizard устгах, хэрэглэгчид мэдэгдэх
+            # Pending wizard устгах (мессеж давхардахгүй)
             delete_pending_confirmation(user_id)
-            try:
-                await context.send_activity("Менежерийн зөвшөөрөл хүлээгдэж байна.")
-            except Exception:
-                pass
-
+            # invoke-д карт буцаах нь хангалттай; давхар текст мессеж бүү илгээ
             return {"type": "AdaptiveCard", "version": "1.5", "body": [{"type": "TextBlock", "text": "Менежерийн зөвшөөрөл хүлээгдэж байна."}]}
         if verb in ("editUserRequest", "edit_user_request"):
             # Дахин эхний карт буцаах
