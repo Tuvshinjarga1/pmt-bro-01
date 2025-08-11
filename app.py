@@ -1151,16 +1151,11 @@ async def call_external_absence_api(request_data):
         #     }
         # }
         
-        # Хэрэглэгчийн анхны мессеж + товч мэдээллийг description болгон ашиглах
-        original_message = request_data.get("original_message", "")
-        reason = request_data.get("reason", "day_off")
+        # Description рүү зөвхөн хэрэглэгчийн бичсэн шалтгааныг дамжуулна, reason нь leave_type байх ёстой
+        reason_text = (request_data.get("reason") or "").strip()
+        leave_type = request_data.get("leave_type") or "day_off"
         inactive_hours = request_data.get("inactive_hours", 8)
-        desc_parts = []
-        if original_message:
-            desc_parts.append(original_message)
-        desc_parts.append(f"reason={reason}")
-        desc_parts.append(f"hours={inactive_hours}")
-        description = " | ".join(desc_parts)
+        description = reason_text
 
         payload = {
             "function": "create_absence_request",
@@ -1168,7 +1163,7 @@ async def call_external_absence_api(request_data):
                 "user_email": "test_user10@fibo.cloud",
                 "start_date": request_data.get("start_date"),
                 "end_date": request_data.get("end_date"),
-                "reason": reason,
+                "reason": leave_type,
                 "in_active_hours": inactive_hours,
                 "description": description
             }
@@ -2937,7 +2932,7 @@ def create_leave_type_card():
                 "id": "leave_type",
                 "style": "compact",
                 "choices": [
-                    {"title": "Богино чөлөө", "value": "paid_short"},
+                    {"title": "Богино чөлөө", "value": "day_off"},
                     {"title": "Өвчтэй", "value": "sick"},
                     {"title": "Remote ажиллах", "value": "remote"},
                     {"title": "Ээлжийн амралт", "value": "vacation"},
