@@ -1427,11 +1427,14 @@ async def send_teams_webhook_notification(requester_name, replacement_worker_nam
             if inactive_hours is not None:
                 hours_text = f"{inactive_hours} цаг"
 
+        replacement_line = f"🔄 Орлон ажиллах: {replacement_worker_name}<br>" if replacement_worker_name else ""
         message = (
             f"📢 Чөлөөний мэдээлэл<br>"
             f"👤 Нэр: {requester_name}<br>"
             f"📅 Хугацаа: {duration_dates}{days_suffix}<br>"
-            f"⏰ Цагийн тоо: {hours_text}<br><br>"
+            f"⏰ Цагийн тоо: {hours_text}<br>"
+            f"{replacement_line}"
+            f"<br>"
             f"{requester_name} чөлөө авсан болохыг анхаарна уу, манайхаан."
         )
         
