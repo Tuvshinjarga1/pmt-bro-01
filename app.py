@@ -3068,6 +3068,8 @@ def create_user_confirmation_card(
     end_date: Optional[str] = None,
     days: Optional[int] = None,
     inactive_hours: Optional[int] = None,
+    hour_from: Optional[str] = None,
+    hour_to: Optional[str] = None,
     reason: Optional[str] = None,
 ) -> Dict:
     """4-р шат: Эцсийн баталгаажуулалт (батлах/засварлах/цуцлах)
@@ -3090,6 +3092,10 @@ def create_user_confirmation_card(
         elif inactive_hours is not None:
             dur_text += f" ({inactive_hours} цаг)"
         details_section.append({"type": "TextBlock", "text": f"Хугацаа: {dur_text}", "wrap": True})
+
+    # Цагийн чөлөө бол эхлэх цагийг тусад нь харуулах
+    if inactive_hours is not None and inactive_hours < 8 and hour_from:
+        details_section.append({"type": "TextBlock", "text": f"Эхлэх цаг: {hour_from}", "wrap": True})
 
     # Шалтгаан (тусад нь)
     if reason is not None:
@@ -3237,6 +3243,8 @@ async def handle_user_adaptive_card_action(context: TurnContext, payload: Dict):
                 end_date=request_data['end_date'],
                 days=request_data['days'],
                 inactive_hours=request_data['inactive_hours'],
+                hour_from=request_data.get('hour_from'),
+                hour_to=request_data.get('hour_to'),
                 reason=request_data['reason']
             )
             attachment = Attachment(content_type="application/vnd.microsoft.card.adaptive", content=card)
@@ -3426,6 +3434,8 @@ async def handle_user_adaptive_card_action_invoke(context: TurnContext, payload:
                 end_date=request_data['end_date'],
                 days=request_data['days'],
                 inactive_hours=request_data['inactive_hours'],
+                hour_from=request_data.get('hour_from'),
+                hour_to=request_data.get('hour_to'),
                 reason=request_data['reason']
             )
 
