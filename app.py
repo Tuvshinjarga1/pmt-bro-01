@@ -892,7 +892,7 @@ def create_approval_card(request_data):
     
     if requester_email and PLANNER_AVAILABLE:
         try:
-            token = get_access_token()
+            token = get_graph_access_token()
             planner_api = MicrosoftPlannerTasksAPI(token)
             tasks = planner_api.get_user_tasks(requester_email)
             
@@ -917,6 +917,12 @@ def create_approval_card(request_data):
                         title = task.get('title', 'Нэргүй task')
                         task_id = task.get('id', '')
                         priority = task.get('priority', 'normal')
+                        # Таскын URL
+                        task_url = None
+                        try:
+                            task_url = planner_api.generate_task_url(task_id)
+                        except Exception:
+                            task_url = None
                         
                         # Due date форматлах
                         due_date = task.get('dueDateTime')
@@ -930,10 +936,25 @@ def create_approval_card(request_data):
                         
                         priority_emoji = "🔴" if priority == "urgent" else "🟡" if priority == "important" else "🔵"
                         
+                        # Гарын үсэгтэй гарчигийг линк болгох
+                        link_text = f"{i}. {priority_emoji} "
+                        if task_url:
+                            link_text += f"[{title}]({task_url}){due_text}"
+                        else:
+                            link_text += f"{title}{due_text}"
+
+                        # Клик хийж нээх линктэй мөр
+                        tasks_section.append({
+                            "type": "TextBlock",
+                            "text": link_text,
+                            "wrap": True
+                        })
+
+                        # Сонголтын toggle (даралгүйгээр линк дээр дарж нээнэ)
                         tasks_section.append({
                             "type": "Input.Toggle",
                             "id": f"task_{task_id}",
-                            "title": f"{i}. {priority_emoji} {title}{due_text}",
+                            "title": "Шилжүүлэхээр сонгох",
                             "value": "false",
                             "valueOn": "true",
                             "valueOff": "false"
@@ -1072,7 +1093,7 @@ def get_user_planner_tasks(user_email):
             return "📋 Planner-д идэвхтэй task олдсонгүй"
         
         # Tasks-ийн мэдээллийг форматлах
-        tasks_info = f"📋 **{user_email} - Planner Tasks:**\n\n"
+        # tasks_info = f"📋 **{user_email} - Planner Tasks:**\n\n"
         # tasks_info = f"📋 **{user_email} - Planner Tasks ({len(tasks)} task):**\n\n"
         
         # Зөвхөн идэвхтэй (дуусаагүй) tasks харуулах
@@ -2916,7 +2937,7 @@ def create_leave_type_card():
                 "id": "leave_type",
                 "style": "compact",
                 "choices": [
-                    {"title": "Цалинтай богино чөлөө", "value": "paid_short"},
+                    {"title": "Богино чөлөө", "value": "paid_short"},
                     {"title": "Өвчтэй", "value": "sick"},
                     {"title": "Remote ажиллах", "value": "remote"},
                     {"title": "Ээлжийн амралт", "value": "vacation"},
