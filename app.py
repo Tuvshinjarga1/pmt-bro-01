@@ -1107,7 +1107,8 @@ def get_user_planner_tasks(user_email):
             title = task.get('title', 'Нэргүй task')
             progress = task.get('percentComplete', 0)
             priority = task.get('priority', 'N/A')
-            
+            task_id = task.get('id')
+
             # Due date форматлах
             due_date = task.get('dueDateTime')
             due_text = ""
@@ -1118,12 +1119,22 @@ def get_user_planner_tasks(user_email):
                     due_text = f" 📅 {dt.strftime('%m/%d')}"
                 except:
                     due_text = f" 📅 {due_date[:10]}"
-            
+
+            # Priority emoji
             priority_emoji = "🔴" if priority == "urgent" else "🟡" if priority == "important" else "🔵"
-            progress_text = f"{progress}%" if progress > 0 else "0%"
-            
-            tasks_info += f"{i}. {priority_emoji} **{title}**\n"
-            # tasks_info += f"   📊 {progress_text} дууссан{due_text}\n\n"
+
+            # Таскын URL гаргаж Markdown hyperlink болгох
+            task_url = None
+            try:
+                if task_id:
+                    task_url = planner_api.generate_task_url(task_id)
+            except Exception:
+                task_url = None
+
+            if task_url:
+                tasks_info += f"{i}. {priority_emoji} [{title}]({task_url}){due_text}\n"
+            else:
+                tasks_info += f"{i}. {priority_emoji} **{title}**{due_text}\n"
         
         if len(active_tasks) > 5:
             tasks_info += f"... болон {len(active_tasks) - 5} бусад task\n"
