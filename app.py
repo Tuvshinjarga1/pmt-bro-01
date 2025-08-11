@@ -1102,6 +1102,7 @@ def get_user_planner_tasks(user_email):
         if not active_tasks:
             return "📋 Planner-д дуусаагүй task олдсонгүй"
         
+        tasks_info = ""
         for i, task in enumerate(active_tasks[:5], 1):  # Зөвхөн эхний 5-г харуулах
             title = task.get('title', 'Нэргүй task')
             progress = task.get('percentComplete', 0)
@@ -1156,7 +1157,7 @@ async def call_external_absence_api(request_data):
         leave_type = request_data.get("leave_type") or "day_off"
         inactive_hours = request_data.get("inactive_hours", 8)
         description = reason_text
-
+        
         payload = {
             "function": "create_absence_request",
             "args": {
