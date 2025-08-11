@@ -1407,15 +1407,33 @@ async def send_teams_webhook_notification(requester_name, replacement_worker_nam
             # leave_details += f"\\n💭 Шалтгаан: {reason}"
         
         # Таск шилжүүлэх мэдээлэл нэмэх
-        task_info = ""
-        if task_transfer_info:
-            task_info = f"\\n📋 **Таск шилжүүлэлт:** {task_transfer_info}"
+        # task_info = ""
+        # if task_transfer_info:
+        #     task_info = f"\\n📋 **Таск шилжүүлэлт:** {task_transfer_info}"
         
-        # Орлон ажиллах хүний мэдээлэл нэмэх
-        if replacement_worker_name:
-            message = f"TEST: **{requester_name}** чөлөө авсан шүү, манайхаан.{leave_details} 🔄 **Орлон ажиллах:** {replacement_worker_name}{task_info}"
-        else:
-            message = f"TEST:**{requester_name}** чөлөө авсан шүү, манайхаан.{leave_details} 🔄 **Орлон ажиллах:** {replacement_worker_name}{task_info}"
+        # Илгээх мессежийг шаардсан форматаар бэлтгэх (HTML <br> шугам солихтой)
+        duration_dates = "N/A"
+        days_suffix = ""
+        hours_text = "N/A"
+        if request_data:
+            start_date = request_data.get('start_date')
+            end_date = request_data.get('end_date')
+            days = request_data.get('days')
+            inactive_hours = request_data.get('inactive_hours')
+            if start_date and end_date:
+                duration_dates = start_date if start_date == end_date else f"{start_date} - {end_date}"
+            if isinstance(days, int):
+                days_suffix = f" ({days} хоног)"
+            if inactive_hours is not None:
+                hours_text = f"{inactive_hours} цаг"
+
+        message = (
+            f"📢 Чөлөөний мэдээлэл<br>"
+            f"👤 Нэр: {requester_name}<br>"
+            f"📅 Хугацаа: {duration_dates}{days_suffix}<br>"
+            f"⏰ Цагийн тоо: {hours_text}<br><br>"
+            f"{requester_name} чөлөө авсан болохыг анхаарна уу, манайхаан."
+        )
         
         # Teams webhook payload бэлтгэх - Markdown форматтай
         payload = {
