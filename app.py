@@ -1385,63 +1385,57 @@ async def call_reject_absence_api(absence_id, comment=""):
 async def send_teams_webhook_notification(requester_name, replacement_worker_name=None, request_data=None, task_transfer_info=None):
     """Teams webhook руу зөвшөөрөлийн мэдэгдэл илгээх"""
     try:
+        # Webhook URL-ийг тохиргооноос ашиглах
         webhook_url = "https://prod-36.southeastasia.logic.azure.com:443/workflows/6dcb3cbe39124404a12b754720b25699/triggers/manual/paths/invoke?api-version=2016-06-01&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=nhqRPaYSLixFlWOePwBHVlyWrbAv6OL7h0SNclMZS0U"
-        
-        # Чөлөөний дэлгэрэнгүй мэдээлэл бэлтгэх - Teams форматтай
-        leave_details = ""
-        if request_data:
-            start_date = request_data.get('start_date', 'N/A')
-            end_date = request_data.get('end_date', 'N/A')
-            days = request_data.get('days', 'N/A')
-            reason = request_data.get('reason', 'N/A')
-            inactive_hours = request_data.get('inactive_hours', 'N/A')
-            hour_from = request_data.get('hour_from')
-            hour_to = request_data.get('hour_to')
-            
-            # Teams-д зөв харагдах форматтай мессеж - олон аргаар оролдох
-            leave_details = f"📅 Хугацаа: {start_date} - {end_date}"
-            if hour_from and hour_to and start_date == end_date:
-                leave_details += f"\n⏰ Цаг: {hour_from} - {hour_to} ({inactive_hours} цаг)"
-            else:
-                leave_details += f"\n⏰ Цаг: {inactive_hours} цаг"
-            # leave_details += f"\\n💭 Шалтгаан: {reason}"
-        
-        # Таск шилжүүлэх мэдээлэл нэмэх
-        # task_info = ""
-        # if task_transfer_info:
-        #     task_info = f"\\n📋 **Таск шилжүүлэлт:** {task_transfer_info}"
-        
-        # Илгээх мессежийг шаардсан форматаар бэлтгэх (HTML <br> шугам солихтой)
-        duration_dates = "N/A"
-        days_suffix = ""
-        hours_text = "N/A"
-        if request_data:
-            start_date = request_data.get('start_date')
-            end_date = request_data.get('end_date')
-            days = request_data.get('days')
-            inactive_hours = request_data.get('inactive_hours')
-            if start_date and end_date:
-                duration_dates = start_date if start_date == end_date else f"{start_date} - {end_date}"
-            if isinstance(days, int):
-                days_suffix = f" ({days} хоног)"
-            if inactive_hours is not None:
-                hours_text = f"{inactive_hours} цаг"
 
-        replacement_line = f"🔄 Орлон ажиллах: {replacement_worker_name}<br>" if replacement_worker_name else ""
-        message = (
-            f"📢 Чөлөөний мэдээлэл<br>"
-            f"👤 Нэр: {requester_name}<br>"
-            f"📅 Хугацаа: {duration_dates}{days_suffix}<br>"
-            f"⏰ Цагийн тоо: {hours_text}<br>"
-            f"{replacement_line}"
-            f"<br>"
-            f"{requester_name} чөлөө авсан болохыг анхаарна уу, манайхаан."
-        )
-        
-        # Teams webhook payload бэлтгэх - Markdown форматтай
-        payload = {
-            "message": message
-        }
+        # Чөлөөний мэдээлэл задлах
+        start_date = request_data.get('start_date') if request_data else None
+        end_date = request_data.get('end_date') if request_data else None
+        days = request_data.get('days') if request_data else None
+        inactive_hours = request_data.get('inactive_hours') if request_data else None
+        hour_from = request_data.get('hour_from') if request_data else None
+        hour_to = request_data.get('hour_to') if request_data else None
+
+        # Хугацааг текстжүүлэх
+        duration_dates = "N/A"
+        if start_date and end_date:
+            duration_dates = start_date if start_date == end_date else f"{start_date} - {end_date}"
+
+        days_suffix = f" ({days} хоног)" if isinstance(days, int) else ""
+
+        # Цагийн чөлөө эсэхийг тодорхойлох
+        is_hour_leave = False
+        if inactive_hours is not None:
+            try:
+                is_hour_leave = float(inactive_hours) < 8
+            except Exception:
+                is_hour_leave = False
+        if hour_from or hour_to:
+            is_hour_leave = True
+
+        # Мессежийн мөрүүд угсрах (цагийн чөлөөнд л цагийн мөрийг оруулна)
+        message_lines = [
+            "📢 Чөлөөний мэдээлэл",
+            f"👤 Нэр: {requester_name}",
+            f"📅 Хугацаа: {duration_dates}{days_suffix}",
+        ]
+
+        if is_hour_leave:
+            if hour_from and hour_to and start_date and end_date and start_date == end_date and inactive_hours is not None:
+                message_lines.append(f"⏰ Цаг: {hour_from} - {hour_to} ({inactive_hours} цаг)")
+            elif inactive_hours is not None:
+                message_lines.append(f"⏰ Цаг: {inactive_hours} цаг")
+
+        if replacement_worker_name:
+            message_lines.append(f"🔄 Орлон ажиллах: {replacement_worker_name}")
+
+        message_lines.append("")
+        message_lines.append(f"{requester_name} чөлөө авсан болохыг анхаарна уу, манайхаан.")
+
+        message = "<br>".join(message_lines)
+
+        # Teams webhook payload бэлтгэх
+        payload = {"message": message}
         
         logger.info(f"Sending Teams webhook notification for {requester_name}")
         
