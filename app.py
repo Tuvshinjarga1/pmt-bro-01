@@ -16,6 +16,7 @@ import threading
 import time
 from typing import Dict, List, Optional
 from urllib.parse import quote
+import uuid as _uuid_for_validation
 
 # Assign planner import
 from assign_planner import TaskAssignmentManager, get_cached_access_token
@@ -458,6 +459,18 @@ class MicrosoftUsersAPI:
     def get_user_by_id(self, user_id: str) -> Optional[Dict]:
         """ID-аар хэрэглэгч олох"""
         try:
+            # Teams-ийн conversation ID (ихэвчлэн "29:") эсвэл AAD GUID биш утгыг Graph-д бүү явуул
+            def _is_valid_guid(value: str) -> bool:
+                try:
+                    _uuid_for_validation.UUID(value)
+                    return True
+                except Exception:
+                    return False
+
+            if not user_id or user_id.startswith("29:") or not _is_valid_guid(user_id):
+                logger.warning(f"Graph get_user_by_id-д буусан user_id хүчинтэй GUID биш тул алгаслаа: {user_id}")
+                return None
+
             url = f"{self.base_url}/users/{user_id}?$select=id,displayName,mail,jobTitle,department,accountEnabled"
             
             response = requests.get(url, headers=self.headers)
@@ -1759,23 +1772,27 @@ async def handle_leave_request_message(context: TurnContext, text, user_id, user
         requester_email = requester_info.get("email")
         leave_days = parsed_data.get("days", 1)  # Чөлөөний хоногийн тоо
         manager_id = get_available_manager_id(requester_email, leave_days)
-        
-        # Manager-ийн мэдээллийг авах
+
+        # Manager-ийн мэдээллийг авах (GUID биш бол э-мэйлээр fallback)
+        manager_info = None
         if manager_id:
-            # Manager ID-аар manager-ийн мэдээллийг олох
-            manager_info = None
             try:
-                # Microsoft Graph API ашиглаж manager-ийн мэдээллийг авах
                 access_token = get_graph_access_token()
                 if access_token:
                     users_api = MicrosoftUsersAPI(access_token)
-                    # Manager ID-аар хэрэглэгч олох
+                    # Эхлээд GUID гэж үзэж оролдоно
                     manager_info = users_api.get_user_by_id(manager_id)
+                    if not manager_info:
+                        # GUID биш байж магадгүй тул э-мэйлээр (leader модулиас) fallback
+                        try:
+                            leader_info = get_user_manager_info(requester_email)
+                            manager_email = leader_info.get('mail') if leader_info else None
+                            if manager_email:
+                                manager_info = users_api.get_user_by_email(manager_email)
+                        except Exception:
+                            pass
             except Exception as e:
-                logger.error(f"Error getting manager info by ID {manager_id}: {str(e)}")
-                manager_info = None
-        else:
-            manager_info = None
+                logger.error(f"Error getting manager info by ID/email {manager_id}: {str(e)}")
         
         request_data = {
             "request_id": request_id,
@@ -2424,20 +2441,24 @@ def submit_leave_request():
         # Dynamic manager ID авах - чөлөөний хугацаанаас хамааран тохирох manager-ийг олох
         manager_id = get_available_manager_id(requester_email, days)
         
-        # Manager-ийн мэдээллийг авах
+        # Manager-ийн мэдээллийг авах (GUID биш тохиолдолд э-мэйлээр fallback)
+        manager_info = None
         if manager_id:
-            # Manager ID-аар manager-ийн мэдээллийг олох
-            manager_info = None
             try:
-                # Microsoft Graph API ашиглаж manager-ийн мэдээллийг авах
                 access_token = get_graph_access_token()
                 if access_token:
                     users_api = MicrosoftUsersAPI(access_token)
-                    # Manager ID-аар хэрэглэгч олох
                     manager_info = users_api.get_user_by_id(manager_id)
+                    if not manager_info:
+                        try:
+                            leader_info = get_user_manager_info(requester_email)
+                            manager_email = leader_info.get('mail') if leader_info else None
+                            if manager_email:
+                                manager_info = users_api.get_user_by_email(manager_email)
+                        except Exception:
+                            pass
             except Exception as e:
-                logger.error(f"Error getting manager info by ID {manager_id}: {str(e)}")
-                manager_info = None
+                logger.error(f"Error getting manager info by ID/email {manager_id}: {str(e)}")
         else:
             manager_info = None
         
@@ -2787,19 +2808,26 @@ def process_messages():
                             leave_days = parsed_data.get("days", 1)  # Чөлөөний хоногийн тоо
                             manager_id = get_available_manager_id(requester_email, leave_days)
                             
-                            # Manager-ийн мэдээллийг авах
+                            # Manager-ийн мэдээллийг авах (GUID биш бол э-мэйлээр fallback)
+                            manager_info = None
                             if manager_id:
-                                # Manager ID-аар manager-ийн мэдээллийг олох
-                                manager_info = None
                                 try:
-                                    # Microsoft Graph API ашиглаж manager-ийн мэдээллийг авах
                                     access_token = get_graph_access_token()
                                     if access_token:
                                         users_api = MicrosoftUsersAPI(access_token)
-                                        # Manager ID-аар хэрэглэгч олох
+                                        # Эхлээд GUID гэж үзэж ID-аар оролдоно
                                         manager_info = users_api.get_user_by_id(manager_id)
+                                        if not manager_info:
+                                            # GUID биш байж магадгүй тул leader модулиас имэйл авч Graph-с имэйлээр татах
+                                            try:
+                                                leader_info = get_user_manager_info(requester_email)
+                                                manager_email = leader_info.get('mail') if leader_info else None
+                                                if manager_email:
+                                                    manager_info = users_api.get_user_by_email(manager_email)
+                                            except Exception:
+                                                pass
                                 except Exception as e:
-                                    logger.error(f"Error getting manager info by ID {manager_id}: {str(e)}")
+                                    logger.error(f"Error getting manager info by ID/email {manager_id}: {str(e)}")
                                     manager_info = None
                             else:
                                 manager_info = None
@@ -3294,6 +3322,14 @@ async def handle_user_adaptive_card_action(context: TurnContext, payload: Dict):
                     if token:
                         users_api = MicrosoftUsersAPI(token)
                         manager_info = users_api.get_user_by_id(manager_id)
+                        if not manager_info:
+                            try:
+                                leader_info = get_user_manager_info(requester_email)
+                                manager_email = leader_info.get('mail') if leader_info else None
+                                if manager_email:
+                                    manager_info = users_api.get_user_by_email(manager_email)
+                            except Exception:
+                                pass
                 except Exception as e:
                     logger.warning(f"Manager info get failed: {str(e)}")
 
@@ -3482,6 +3518,14 @@ async def handle_user_adaptive_card_action_invoke(context: TurnContext, payload:
                     if token:
                         users_api = MicrosoftUsersAPI(token)
                         manager_info = users_api.get_user_by_id(manager_id)
+                        if not manager_info:
+                            try:
+                                leader_info = get_user_manager_info(requester_email)
+                                manager_email = leader_info.get('mail') if leader_info else None
+                                if manager_email:
+                                    manager_info = users_api.get_user_by_email(manager_email)
+                            except Exception:
+                                pass
                 except Exception as e:
                     logger.warning(f"Manager info get failed: {str(e)}")
 
@@ -4352,7 +4396,7 @@ async def send_approved_request_to_manager(request_data, original_message):
             start_manager_response_timer(request_data['request_id'], request_data)
             
             logger.info(f"Approved leave request {request_data['request_id']} sent to manager with 2-hour response timer")
-        else: 
+        else:
             logger.warning(f"Manager conversation reference not found for request {request_data['request_id']}")
     except Exception as e:
         logger.error(f"Error sending approved request to manager: {str(e)}")
