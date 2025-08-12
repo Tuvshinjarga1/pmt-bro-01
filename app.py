@@ -1043,7 +1043,17 @@ def create_approval_card(request_data):
                     {
                         "title": "Цагийн тоо:",
                         "value": f"{request_data.get('inactive_hours', 'N/A')} цаг"
+                    }
+                ] + ([
+                    {
+                        "title": "Эхлэх цаг:",
+                        "value": request_data.get("hour_from", "N/A")
                     },
+                    {
+                        "title": "Дуусах цаг:",
+                        "value": request_data.get("hour_to", "N/A")
+                    }
+                ] if request_data.get("hour_from") and request_data.get("hour_to") else []) + [
                     {
                         "title": "Шалтгаан:",
                         "value": request_data.get("reason", "Тодорхойгүй")
@@ -3655,7 +3665,17 @@ async def handle_adaptive_card_action(context: TurnContext, action_data):
                             {
                                 "title": "Цагийн тоо:",
                                 "value": f"{request_data.get('inactive_hours', 'N/A')} цаг"
+                            }
+                        ] + ([
+                            {
+                                "title": "Эхлэх цаг:",
+                                "value": request_data.get("hour_from", "N/A")
                             },
+                            {
+                                "title": "Дуусах цаг:",
+                                "value": request_data.get("hour_to", "N/A")
+                            }
+                        ] if request_data.get("hour_from") and request_data.get("hour_to") else []) + [
                             {
                                 "title": "Шалтгаан:",
                                 "value": request_data.get("reason", "Тодорхойгүй")
