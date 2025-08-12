@@ -1276,7 +1276,7 @@ async def call_external_absence_api(request_data):
 async def call_approve_absence_api(absence_id, comment="Зөвшөөрсөн"):
     """External API руу absence approve дуудлага хийх"""
     try:
-        api_url = "https://mcp-server-production-6219.up.railway.app/call-function"
+        api_url = os.getenv("ABSENCE_API_URL", "https://mcp-server-production-c4d1.up.railway.app/call-function")
         
         # API payload бэлтгэх
         payload = {
@@ -1338,7 +1338,7 @@ async def call_approve_absence_api(absence_id, comment="Зөвшөөрсөн"):
 async def call_reject_absence_api(absence_id, comment=""):
     """External API руу absence reject дуудлага хийх"""
     try:
-        api_url = "https://mcp-server-production-6219.up.railway.app/call-function"
+        api_url = os.getenv("ABSENCE_API_URL", "https://mcp-server-production-c4d1.up.railway.app/call-function")
         
         # API payload бэлтгэх
         payload = {
@@ -1575,6 +1575,8 @@ type Absence struct {{
 - reason: Шалтгаан (string)
 - employee_id: Ажилтны ID (засвар хийх шаардлагагүй, backend дээр тохируулна)
 - inactive_hours: Идэвхгүй цагийн тоо (ЦААГААР тооцоолох)
+- hour_from: Эхлэх цаг (HH:MM формат, зөвхөн цагийн чөлөөнд)
+- hour_to: Дуусах цаг (HH:MM формат, зөвхөн цагийн чөлөөнд)
 - status: Төлөв (default: "pending")
 - needs_clarification: Нэмэлт мэдээлэл хэрэгтэй эсэх (true/false)
 - questions: Хэрэв needs_clarification true бол асуух асуултууд
@@ -1592,8 +1594,12 @@ type Absence struct {{
 - "2 ЦАГ" = 2 цаг
 - "3 ЦАГ" = 3 цаг
 - "4 ЦАГ" = 4 цаг
-- "ӨГЛӨӨний ЦАГ" эсвэл "ӨГЛӨӨ" = 4 цаг
-- "ҮДЭЭС ХОЙШ" эсвэл "ҮДИЙН ЦАГ" = 4 цаг
+- "ӨГЛӨӨний ЦАГ" эсвэл "ӨГЛӨӨ" = 4 цаг (hour_from: "09:00", hour_to: "13:00")
+- "ҮДЭЭС ХОЙШ" эсвэл "ҮДИЙН ЦАГ" = 4 цаг (hour_from: "13:00", hour_to: "17:00")
+- "ӨГЛӨӨ 9-13" = 4 цаг (hour_from: "09:00", hour_to: "13:00")
+- "Үдээс 1-5" = 4 цаг (hour_from: "13:00", hour_to: "17:00")
+- "10-12 цаг" = 2 цаг (hour_from: "10:00", hour_to: "12:00")
+- "14-16 цаг" = 2 цаг (hour_from: "14:00", hour_to: "16:00")
 
 ШАЛТГААНЫ ДҮРЭМ:
 - Хувийн шалтгаанаар чөлөө авбал = "day_off"
@@ -1606,6 +1612,11 @@ type Absence struct {{
 - Хэрэв огноо тодорхойгүй бол needs_clarification = true болгож "Хэзээ чөлөө авах вэ?" асуулт нэмэх
 - Хэрэв цаг/хоног тодорхойгүй бол needs_clarification = true болгож "Хэдэн хоног эсвэл цаг чөлөө авах вэ?" асуулт нэмэх
 - Status үргэлж "pending" байна
+
+ЦАГИЙН МЭДЭЭЛЛИЙН ДҮРЭМ:
+- Хэрэв inactive_hours < 8 бол hour_from болон hour_to утгуудыг тохируулах
+- Хэрэв цагийн мэдээлэл тодорхойгүй бол hour_from = null, hour_to = null
+- Цагийн формат: HH:MM (жишээ: "09:00", "13:30", "17:00")
 
 НЭМЭЛТ МЭДЭЭЛЭЛ ШААРДЛАГАТАЙ ҮЕИЙН ДҮРЭМ:
 - Хэрэв огноо тодорхойгүй бол needs_clarification = true
@@ -3541,6 +3552,8 @@ async def handle_user_adaptive_card_action_invoke(context: TurnContext, payload:
                 "days": rd["days"],
                 "reason": rd.get("reason", "day_off"),
                 "inactive_hours": rd.get("inactive_hours", rd.get("days", 1) * 8),
+                "hour_from": rd.get("hour_from"),
+                "hour_to": rd.get("hour_to"),
                 "status": "pending",
                 "original_message": rd.get("original_message", "wizard"),
                 "created_at": datetime.now().isoformat(),
@@ -3854,7 +3867,7 @@ async def handle_adaptive_card_action(context: TurnContext, action_data):
                         replacement_info = f"\n⚠️ Орлон ажиллах хүн томилоход алдаа: {replacement_result['message']}"
                     
                     await ctx.send_activity(f"🎉 Таны чөлөөний хүсэлт зөвшөөрөгдлөө!\n📅 {request_data['start_date']} - {request_data['end_date']} ({request_data['days']} хоног)\n✨ Сайхан амраарай!{approval_status_msg}{webhook_status_msg}{replacement_info}{task_transfer_info}")
-
+                    
                 await ADAPTER.continue_conversation(
                     requester_conversation,
                     notify_approval,
