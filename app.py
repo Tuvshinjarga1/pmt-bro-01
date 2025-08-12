@@ -925,8 +925,8 @@ def create_approval_card(request_data):
                         }
                     ])
                     
-                    # Зөвхөн эхний 5 tasks харуулах
-                    for i, task in enumerate(active_tasks[:5], 1):
+                    # Бүх идэвхтэй tasks харуулах
+                    for i, task in enumerate(active_tasks, 1):
                         title = task.get('title', 'Нэргүй task')
                         task_id = task.get('id', '')
                         priority = task.get('priority', 'normal')
@@ -971,14 +971,6 @@ def create_approval_card(request_data):
                             "value": "false",
                             "valueOn": "true",
                             "valueOff": "false"
-                        })
-                    
-                    if len(active_tasks) > 5:
-                        tasks_section.append({
-                            "type": "TextBlock",
-                            "text": f"... болон {len(active_tasks) - 5} бусад task",
-                            "isSubtle": True,
-                            "spacing": "small"
                         })
                 else:
                     tasks_section.append({
@@ -1044,7 +1036,7 @@ def create_approval_card(request_data):
                         "title": "Цагийн тоо:",
                         "value": f"{request_data.get('inactive_hours', 'N/A')} цаг"
                     }
-                ] + ([
+                ] + [
                     {
                         "title": "Эхлэх цаг:",
                         "value": request_data.get("hour_from", "N/A")
@@ -1053,7 +1045,7 @@ def create_approval_card(request_data):
                         "title": "Дуусах цаг:",
                         "value": request_data.get("hour_to", "N/A")
                     }
-                ] if request_data.get("hour_from") and request_data.get("hour_to") else []) + [
+                ] + [
                     {
                         "title": "Шалтгаан:",
                         "value": request_data.get("reason", "Тодорхойгүй")
@@ -1443,11 +1435,11 @@ async def send_teams_webhook_notification(requester_name, replacement_worker_nam
             f"📅 Хугацаа: {duration_dates}{days_suffix}",
         ]
 
-        if is_hour_leave:
-            if hour_from and hour_to and start_date and end_date and start_date == end_date and inactive_hours is not None:
-                message_lines.append(f"⏰ Цаг: {hour_from} - {hour_to} ({inactive_hours} цаг)")
-            elif inactive_hours is not None:
-                message_lines.append(f"⏰ Цаг: {inactive_hours} цаг")
+        # Цагийн мэдээллийг харуулах
+        if hour_from and hour_to:
+            message_lines.append(f"⏰ Цаг: {hour_from} - {hour_to}")
+        elif inactive_hours is not None and float(inactive_hours) < 8:
+            message_lines.append(f"⏰ Цаг: {inactive_hours} цаг")
 
         if replacement_worker_name:
             message_lines.append(f"🔄 Орлон ажиллах: {replacement_worker_name}")
