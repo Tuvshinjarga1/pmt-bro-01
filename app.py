@@ -4811,7 +4811,8 @@ async def create_absence_with_time_intervals(request_data: Dict) -> Dict:
         payload = {
             "function": "create_absence_with_intervals",
             "args": {
-                "user_email": request_data.get("requester_email", "test_user10@fibo.cloud"),
+                # "user_email": request_data.get("requester_email", "test_user10@fibo.cloud"),
+                "user_id": "test_user10@fibo.cloud",
                 "start_date": start_date,
                 "end_date": request_data.get("end_date"),
                 "reason": leave_type,
