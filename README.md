@@ -48,6 +48,7 @@ python app.py
 - ⏰ **Manager timeout механизм (2 цаг)**
 - 👥 **Орлон ажиллах хүн томилох систем**
 - 🧹 **Дууссан чөлөөний автомат цэвэрлэлт**
+- ⏰ **Time Intervals интеграци** - Чөлөөний хүсэлт үүсгэхэд time intervals автоматаар ашиглах
 
 ## API Endpoints
 
@@ -61,6 +62,7 @@ python app.py
 - `GET /replacement-workers/<email>` - Орлон ажиллах хүмүүсийг жагсаах
 - `POST /auto-remove-replacement-workers` - Чөлөө дуусахад автомат хасах
 - `POST /cleanup-expired-leaves` - Дууссан чөлөөний цэвэрлэлт
+- `GET /time-intervals` - Time intervals авах (absence үүсгэхэд ашиглах)
 - `POST /manager-timeout-test` - Manager timeout тест
 
 ## Workflow
@@ -74,9 +76,10 @@ python app.py
 5. Manager руу adaptive card илгээнэ (tasks мэдээлэлтэй)
 6. Manager зөвшөөрөх/татгалзах
 7. **2 цагийн timeout механизм** - хэрэв manager хариулахгүй бол HR руу мэдэгдэнэ
-8. External API руу автоматаар дуудлага хийнэ
-9. **Орлон ажиллах хүн томилох** (сонголттой)
-10. **Дууссан чөлөөний автомат цэвэрлэлт**
+8. **Time intervals автоматаар авах** - Чөлөөний огноогоор time intervals олж absence үүсгэхэд ашиглах
+9. External API руу автоматаар дуудлага хийнэ
+10. **Орлон ажиллах хүн томилох** (сонголттой)
+11. **Дууссан чөлөөний автомат цэвэрлэлт**
 
 ## 📁 Систем бүтэц
 
@@ -216,6 +219,62 @@ Manager чөлөөний хүсэлтийг зөвшөөрөх үед орлон
 - Автоматаар Microsoft Graph API-аар sponsor томилогдоно
 - Planner tasks автоматаар орлон ажиллах хүн рүү шилжинэ
 
+### ⏰ Time Intervals интеграци
+
+Систем автоматаар чөлөөний огноогоор time intervals-ийг олж, absence үүсгэхэд ашиглана:
+
+- **Автомат time intervals авах**: Чөлөөний эхлэх огноогоор external API-аас time intervals авах
+- **Interval ID ашиглах**: Time intervals-ийн ID-г absence үүсгэхэд ашиглах
+- **Absence үүсгэхэд ашиглах**: Time intervals болон interval ID-г absence request-д нэмж илгээх
+- **Fallback механизм**: Time intervals байхгүй бол ердийн absence үүсгэх
+- **API endpoint**: `GET /time-intervals?start_date=YYYY-MM-DD` - Time intervals болон ID авах
+
+**Time Intervals API Response жишээ:**
+
+```json
+{
+  "success": true,
+  "intervals": [
+    {
+      "id": 156,
+      "name": "August -р сарын 9",
+      "begin_date": "2025-08-08T16:00:00.092353Z",
+      "end_date": "2025-08-14T16:00:00.001751Z",
+      "it_over": false
+    }
+  ],
+  "interval_ids": [156],
+  "count": 1,
+  "start_date": "2025-08-09"
+}
+```
+
+**Absence үүсгэх API Payload жишээ:**
+
+```json
+{
+  "function": "create_absence_with_intervals",
+  "args": {
+    "user_email": "test_user10@fibo.cloud",
+    "start_date": "2025-08-09",
+    "end_date": "2025-08-09",
+    "reason": "day_off",
+    "in_active_hours": 8,
+    "description": "Хувийн чөлөө",
+    "time_interval_ids": [156],
+    "time_intervals": [
+      {
+        "id": 156,
+        "name": "August -р сарын 9",
+        "begin_date": "2025-08-08T16:00:00.092353Z",
+        "end_date": "2025-08-14T16:00:00.001751Z",
+        "it_over": false
+      }
+    ]
+  }
+}
+```
+
 ### 📝 Чөлөөний шалтгааны автомат олж авах
 
 Систем автоматаар хэрэглэгчийн анхны мессежээс чөлөөний шалтгааныг олж авна:
@@ -263,6 +322,7 @@ graph TD
     C --> M[Timeout Handler]
     C --> N[Replacement Worker]
     C --> R[CEO Lookup]
+    C --> U[Time Intervals API]
 
     D -->|Microsoft Graph| H[Planner/To-Do APIs]
     E -->|OpenAI| I[GPT-4 NLP]
@@ -273,6 +333,7 @@ graph TD
     N -->|Sponsor Assignment| Q[Microsoft Graph]
     R -->|Job Title Search| S[jobtitle.py]
     R -->|Conversation ID| T[conversations/]
+    U -->|External API| V[Time Intervals DB]
 ```
 
 ## 🚨 Алдаа засах
