@@ -3132,10 +3132,10 @@ def create_date_time_card(parsed_data: Dict, leave_type: Optional[str] = None, r
                     body.append({"type": "Input.Date", "id": f"day_{i+1}", "value": day_dt.strftime("%Y-%m-%d")})
             else:
                 for i in range(1, max(1, days) + 1):
-                    body.append({"type": "Input.Date", "id": f"day_{i}"})
+                    body.append({"type": "Input.Date", "id": f"day_{i+1}"})
         except Exception:
             for i in range(1, max(1, days) + 1):
-                body.append({"type": "Input.Date", "id": f"day_{i}"})
+                body.append({"type": "Input.Date", "id": f"day_{i+1}"})
 
         body.append({"type": "TextBlock", "text": f"Нийт: {days * 8} цаг", "wrap": True, "spacing": "Medium"})
 
@@ -3298,7 +3298,7 @@ async def handle_user_adaptive_card_action(context: TurnContext, payload: Dict):
             else:
                 selected_days = []
                 for i in range(1, max(1, int(days)) + 1):
-                    d = values.get(f"day_{i}")
+                    d = values.get(f"day_{i+1}")
                     if d:
                         selected_days.append(d)
                 if not selected_days:
@@ -3498,7 +3498,7 @@ async def handle_user_adaptive_card_action_invoke(context: TurnContext, payload:
             else:
                 selected_days = []
                 for i in range(1, max(1, int(days)) + 1):
-                    d = values.get(f"day_{i}")
+                    d = values.get(f"day_{i+1}")
                     if d:
                         selected_days.append(d)
                 if not selected_days:
