@@ -1194,6 +1194,7 @@ async def call_external_absence_api(request_data):
         }
         
         logger.info(f"Calling external API for absence request: {payload}")
+        logger.info(f"API URL: {api_url}")
         
         # HTTP POST дуудлага хийх
         try:
@@ -1239,6 +1240,7 @@ async def call_external_absence_api(request_data):
             logger.error(f"API Error Response: {response.text}")
             logger.error(f"API Error Headers: {dict(response.headers)}")
             logger.error(f"Sent Payload: {payload}")
+            logger.error(f"API URL: {api_url}")
             # 404 бол fallback function нэр/зам шалгаж энгийн форматтай шинэ endpoint руу оролдох боломжтой
             return {
                 "success": False,
@@ -4792,13 +4794,9 @@ async def create_absence_with_time_intervals(request_data: Dict) -> Dict:
         intervals = await get_time_intervals_from_api(start_date)
         
         if not intervals:
-            logger.warning(f"No time intervals found for start_date: {start_date}")
-            # Time intervals байхгүй үед одоогоор алдаа буцаана
-            return {
-                "success": False,
-                "error": "No intervals",
-                "message": "Time intervals not found; absence creation requires intervals"
-            }
+            logger.warning(f"No time intervals found for start_date: {start_date}, falling back to regular absence creation")
+            # Time intervals байхгүй бол ердийн absence үүсгэх
+            return await call_external_absence_api(request_data)
         
         # Time intervals-тэй absence үүсгэх
         api_url = os.getenv("ABSENCE_API_URL", "https://mcp-server-production-c4d1.up.railway.app/call-function")
@@ -4827,6 +4825,7 @@ async def create_absence_with_time_intervals(request_data: Dict) -> Dict:
         }
         
         logger.info(f"Calling external API for absence with intervals: {payload}")
+        logger.info(f"API URL: {api_url}")
         
         response = requests.post(
             api_url,
@@ -4858,21 +4857,17 @@ async def create_absence_with_time_intervals(request_data: Dict) -> Dict:
             }
         else:
             logger.error(f"Absence with intervals API error - Status: {response.status_code}, Response: {response.text}")
-            # Legacy API руу fallback хийхгүй
-            return {
-                "success": False,
-                "error": f"API returned status {response.status_code}",
-                "message": response.text
-            }
+            logger.error(f"API URL: {api_url}")
+            logger.error(f"Payload sent: {payload}")
+            # Fallback to regular absence creation
+            logger.info("Falling back to regular absence creation due to API error")
+            return await call_external_absence_api(request_data)
             
     except Exception as e:
         logger.error(f"Error creating absence with time intervals: {str(e)}")
-        # Legacy API руу fallback хийхгүй
-        return {
-            "success": False,
-            "error": "Creation failed",
-            "message": str(e)
-        }
+        # Fallback to regular absence creation
+        logger.info("Falling back to regular absence creation due to exception")
+        return await call_external_absence_api(request_data)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
