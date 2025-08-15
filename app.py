@@ -1194,7 +1194,6 @@ async def call_external_absence_api(request_data):
         }
         
         logger.info(f"Calling external API for absence request: {payload}")
-        logger.info(f"API URL: {api_url}")
         
         # HTTP POST дуудлага хийх
         try:
@@ -1240,7 +1239,6 @@ async def call_external_absence_api(request_data):
             logger.error(f"API Error Response: {response.text}")
             logger.error(f"API Error Headers: {dict(response.headers)}")
             logger.error(f"Sent Payload: {payload}")
-            logger.error(f"API URL: {api_url}")
             # 404 бол fallback function нэр/зам шалгаж энгийн форматтай шинэ endpoint руу оролдох боломжтой
             return {
                 "success": False,
@@ -1837,8 +1835,8 @@ async def handle_leave_request_message(context: TurnContext, text, user_id, user
         approval_card = create_approval_card(request_data)
         approver_conversation = load_conversation_reference(manager_id) if manager_id else None
         
-        # External API руу absence request үүсгэх (time intervals-тэй)
-        api_result = await create_absence_with_time_intervals(request_data)
+        # External API руу absence request үүсгэх
+        api_result = await call_external_absence_api(request_data)
         api_status_msg = ""
         if api_result["success"]:
             api_status_msg = "\n✅ Системд амжилттай бүртгэгдлээ"
@@ -1968,8 +1966,8 @@ async def forward_message_to_admin(text, user_name, user_id):
             # Хүсэлт хадгалах
             save_leave_request(request_data)
             
-            # External API руу absence request үүсгэх (time intervals-тэй)
-            api_result = await create_absence_with_time_intervals(request_data)
+            # External API руу absence request үүсгэх
+            api_result = await call_external_absence_api(request_data)
             api_status_msg = ""
             if api_result["success"]:
                 api_status_msg = "\n✅ Системд амжилттай бүртгэгдлээ"
@@ -2241,7 +2239,7 @@ def health_check():
     return jsonify({
         "status": "running",
         "message": "Flask Bot Server is running",
-        "endpoints": ["/api/messages", "/proactive-message", "/users", "/broadcast", "/leave-request", "/approval-callback", "/send-by-conversation", "/manager-timeout-test", "/replacement-worker", "/replacement-workers/<email>", "/auto-remove-replacement-workers", "/cleanup-expired-leaves", "/time-intervals"],
+        "endpoints": ["/api/messages", "/proactive-message", "/users", "/broadcast", "/leave-request", "/approval-callback", "/send-by-conversation", "/manager-timeout-test", "/replacement-worker", "/replacement-workers/<email>", "/auto-remove-replacement-workers", "/cleanup-expired-leaves"],
         "app_id_configured": bool(os.getenv("MICROSOFT_APP_ID")),
         "stored_users": len(list_all_users()),
         "pending_confirmations": pending_confirmations,
@@ -2429,38 +2427,6 @@ def cleanup_expired_leaves_endpoint():
             "message": str(e)
         }), 500
 
-@app.route("/time-intervals", methods=["GET"])
-def get_time_intervals_endpoint():
-    """Time intervals авах endpoint"""
-    try:
-        start_date = request.args.get("start_date")
-        if not start_date:
-            return jsonify({
-                "success": False,
-                "message": "start_date parameter шаардлагатай"
-            }), 400
-        
-        # Time intervals авах
-        intervals = asyncio.run(get_time_intervals_from_api(start_date))
-        
-        # Interval ID-г авах
-        interval_ids = [interval.get("id") for interval in intervals if interval.get("id")]
-        
-        return jsonify({
-            "success": True,
-            "intervals": intervals,
-            "interval_ids": interval_ids,
-            "count": len(intervals),
-            "start_date": start_date
-        })
-        
-    except Exception as e:
-        logger.error(f"Time intervals endpoint алдаа: {str(e)}")
-        return jsonify({
-            "success": False,
-            "message": str(e)
-        }), 500
-
 @app.route("/leave-request", methods=["POST"])
 def submit_leave_request():
     """Чөлөөний хүсэлт гаргах"""
@@ -2533,10 +2499,10 @@ def submit_leave_request():
         if not save_leave_request(request_data):
             return jsonify({"error": "Failed to save leave request"}), 500
 
-        # External API руу absence request үүсгэх (time intervals ашиглана)
+        # External API руу absence request үүсгэх
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        api_result = loop.run_until_complete(create_absence_with_time_intervals(request_data))
+        api_result = loop.run_until_complete(call_external_absence_api(request_data))
         
         api_status_msg = ""
         if api_result["success"]:
@@ -2754,8 +2720,8 @@ def process_messages():
                                     # Хүсэлт хадгалах
                                     save_leave_request(request_data)
                                     
-                                    # External API руу absence request үүсгэх (time intervals ашиглана)
-                                    api_result = await create_absence_with_time_intervals(request_data)
+                                    # External API руу absence request үүсгэх
+                                    api_result = await call_external_absence_api(request_data)
                                     api_status_msg = ""
                                     if api_result["success"]:
                                         api_status_msg = "\n✅ Системд амжилттай бүртгэгдлээ"
@@ -3134,10 +3100,10 @@ def create_date_time_card(parsed_data: Dict, leave_type: Optional[str] = None, r
                     body.append({"type": "Input.Date", "id": f"day_{i+1}", "value": day_dt.strftime("%Y-%m-%d")})
             else:
                 for i in range(1, max(1, days) + 1):
-                    body.append({"type": "Input.Date", "id": f"day_{i+1}"})
+                    body.append({"type": "Input.Date", "id": f"day_{i}"})
         except Exception:
             for i in range(1, max(1, days) + 1):
-                body.append({"type": "Input.Date", "id": f"day_{i+1}"})
+                body.append({"type": "Input.Date", "id": f"day_{i}"})
 
         body.append({"type": "TextBlock", "text": f"Нийт: {days * 8} цаг", "wrap": True, "spacing": "Medium"})
 
@@ -3300,7 +3266,7 @@ async def handle_user_adaptive_card_action(context: TurnContext, payload: Dict):
             else:
                 selected_days = []
                 for i in range(1, max(1, int(days)) + 1):
-                    d = values.get(f"day_{i+1}")
+                    d = values.get(f"day_{i}")
                     if d:
                         selected_days.append(d)
                 if not selected_days:
@@ -3401,8 +3367,8 @@ async def handle_user_adaptive_card_action(context: TurnContext, payload: Dict):
             # Хадгалах
             save_leave_request(finalized_request)
 
-            # External API руу дуудлага (time intervals ашиглана)
-            api_result = await create_absence_with_time_intervals(finalized_request)
+            # External API руу дуудлага
+            api_result = await call_external_absence_api(finalized_request)
             if api_result.get("success") and api_result.get("absence_id"):
                 finalized_request["absence_id"] = api_result["absence_id"]
                 save_leave_request(finalized_request)
@@ -3500,7 +3466,7 @@ async def handle_user_adaptive_card_action_invoke(context: TurnContext, payload:
             else:
                 selected_days = []
                 for i in range(1, max(1, int(days)) + 1):
-                    d = values.get(f"day_{i+1}")
+                    d = values.get(f"day_{i}")
                     if d:
                         selected_days.append(d)
                 if not selected_days:
@@ -3600,7 +3566,7 @@ async def handle_user_adaptive_card_action_invoke(context: TurnContext, payload:
             save_leave_request(finalized_request)
 
             # External систем рүү илгээх
-            api_result = await create_absence_with_time_intervals(finalized_request)
+            api_result = await call_external_absence_api(finalized_request)
             if api_result.get("success") and api_result.get("absence_id"):
                 finalized_request["absence_id"] = api_result["absence_id"]
                 save_leave_request(finalized_request)
@@ -4728,146 +4694,6 @@ async def unassign_tasks_on_leave_end(requester_email: str) -> Dict:
     except Exception as e:
         logger.error(f"Task unassign хийхэд алдаа: {str(e)}")
         return {"success": False, "message": f"Task unassign хийхэд алдаа: {str(e)}"}
-
-async def get_time_intervals_from_api(start_date: str) -> List[Dict]:
-    """External API-аас time intervals авах"""
-    try:
-        api_url = os.getenv("ABSENCE_API_URL", "https://mcp-server-production-c4d1.up.railway.app/call-function")
-        
-        payload = {
-            "function": "get_time_intervals",
-            "args": {
-                "start_date": start_date
-            }
-        }
-        
-        logger.info(f"Calling external API for time intervals: {payload}")
-        
-        response = requests.post(
-            api_url,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=30
-        )
-        
-        if response.status_code == 200:
-            result = response.json()
-            logger.info(f"Time intervals API success: {result}")
-            
-            # Response-аас intervals авах
-            intervals = []
-            if isinstance(result, dict):
-                intervals = (result.get("result", []) or 
-                           result.get("intervals", []) or 
-                           result.get("data", []))
-            
-            # Intervals-ийн id-г лог-д хэвлэх
-            interval_ids = [interval.get("id") for interval in intervals if interval.get("id")]
-            logger.info(f"Retrieved {len(intervals)} time intervals for start_date: {start_date}")
-            logger.info(f"Interval IDs: {interval_ids}")
-            return intervals
-        else:
-            logger.error(f"Time intervals API error - Status: {response.status_code}, Response: {response.text}")
-            return []
-            
-    except requests.exceptions.Timeout:
-        logger.error("Time intervals API timeout")
-        return []
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Time intervals API request error: {str(e)}")
-        return []
-    except Exception as e:
-        logger.error(f"Unexpected error calling time intervals API: {str(e)}")
-        return []
-
-async def create_absence_with_time_intervals(request_data: Dict) -> Dict:
-    """Time intervals ашиглаж absence үүсгэх"""
-    try:
-        start_date = request_data.get("start_date")
-        if not start_date:
-            return {
-                "success": False,
-                "message": "start_date шаардлагатай"
-            }
-        
-        # Time intervals авах
-        intervals = await get_time_intervals_from_api(start_date)
-        
-        if not intervals:
-            logger.warning(f"No time intervals found for start_date: {start_date}, falling back to regular absence creation")
-            # Time intervals байхгүй бол ердийн absence үүсгэх
-            return await call_external_absence_api(request_data)
-        
-        # Time intervals-тэй absence үүсгэх
-        api_url = os.getenv("ABSENCE_API_URL", "https://mcp-server-production-c4d1.up.railway.app/call-function")
-        
-        # Time intervals-ийн ID-г авах
-        interval_ids = [interval.get("id") for interval in intervals if interval.get("id")]
-        
-        # Time intervals-ийг absence request-д нэмэх
-        reason_text = (request_data.get("reason") or "").strip()
-        leave_type = request_data.get("leave_type") or "day_off"
-        inactive_hours = request_data.get("inactive_hours", 8)
-        description = reason_text
-        
-        payload = {
-            "function": "create_absence_request",
-            "args": {
-                # "user_email": request_data.get("requester_email", "test_user10@fibo.cloud"),
-                "user_id": "test_user10@fibo.cloud",
-                "start_date": start_date,
-                "end_date": request_data.get("end_date"),
-                "reason": leave_type,
-                "in_active_hours": inactive_hours,
-                "description": description,
-                "time_interval_ids": interval_ids,  # ID-г илгээх
-            }
-        }
-        
-        logger.info(f"Calling external API for absence with intervals: {payload}")
-        logger.info(f"API URL: {api_url}")
-        
-        response = requests.post(
-            api_url,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=30
-        )
-        
-        if response.status_code == 200:
-            result = response.json()
-            logger.info(f"Absence with intervals API success: {result}")
-            
-            # Response-аас absence_id авах
-            absence_id = None
-            if isinstance(result, dict):
-                absence_id = (result.get("result", {}).get("absence_id") or 
-                             result.get("absence_id") or 
-                             result.get("id") or 
-                             result.get("data", {}).get("id"))
-            
-            return {
-                "success": True,
-                "data": result,
-                "absence_id": absence_id,
-                "message": "Absence with time intervals created successfully",
-                "intervals_count": len(intervals),
-                "interval_ids": interval_ids,
-                "intervals": intervals
-            }
-        else:
-            logger.error(f"Absence with intervals API error - Status: {response.status_code}, Response: {response.text}")
-            logger.error(f"API URL: {api_url}")
-            logger.error(f"Payload sent: {payload}")
-            # Fallback to regular absence creation
-            logger.info("Falling back to regular absence creation due to API error")
-            return await call_external_absence_api(request_data)
-            
-    except Exception as e:
-        logger.error(f"Error creating absence with time intervals: {str(e)}")
-        # Fallback to regular absence creation
-        logger.info("Falling back to regular absence creation due to exception")
-        return await call_external_absence_api(request_data)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
