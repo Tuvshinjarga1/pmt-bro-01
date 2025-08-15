@@ -1118,7 +1118,7 @@ def get_user_planner_tasks(user_email):
             return "📋 Planner-д дуусаагүй task олдсонгүй"
         
         tasks_info = ""
-        for i, task in enumerate(active_tasks[:5], 1):  # Зөвхөн эхний 5-г харуулах
+        for i, task in enumerate(active_tasks, 1):  # Бүх task-ыг харуулах
             title = task.get('title', 'Нэргүй task')
             progress = task.get('percentComplete', 0)
             priority = task.get('priority', 'N/A')
@@ -1150,9 +1150,6 @@ def get_user_planner_tasks(user_email):
                 tasks_info += f"{i}. {priority_emoji} [{title}]({task_url}){due_text}\n"
             else:
                 tasks_info += f"{i}. {priority_emoji} **{title}**{due_text}\n"
-        
-        if len(active_tasks) > 5:
-            tasks_info += f"... болон {len(active_tasks) - 5} бусад task\n"
         
         return tasks_info.strip()
         
@@ -1437,9 +1434,13 @@ async def send_teams_webhook_notification(requester_name, replacement_worker_nam
 
         # Цагийн мэдээллийг харуулах
         if hour_from and hour_to:
-            message_lines.append(f"⏰ Цаг: {hour_from} - {hour_to}")
+            message_lines.append(f"⏰ Цаг: {hour_from} - {hour_to} ({inactive_hours} цаг)")
         elif inactive_hours is not None and float(inactive_hours) < 8:
             message_lines.append(f"⏰ Цаг: {inactive_hours} цаг")
+        elif hour_from:
+            message_lines.append(f"⏰ Эхлэх цаг: {hour_from}")
+        elif hour_to:
+            message_lines.append(f"⏰ Дуусах цаг: {hour_to}")
 
         if replacement_worker_name:
             message_lines.append(f"🔄 Орлон ажиллах: {replacement_worker_name}")
